@@ -1,0 +1,33 @@
+{
+  "feature_names": [
+    "hour",
+    "day_of_week",
+    "is_night",
+    "txn_count_1h",
+    "txn_amount_1h",
+    "txn_count_24h",
+    "txn_amount_24h",
+    "amt_hist_mean",
+    "amt_hist_std",
+    "amt_zscore",
+    "dist_from_prev_km",
+    "time_since_prev_h",
+    "speed_kmh",
+    "merchant_freq",
+    "category_freq",
+    "category_target_enc",
+    "merchant_target_enc",
+    "age",
+    "amt",
+    "city_pop",
+    "gender"
+  ],
+  "categorical_features": [
+    "gender"
+  ],
+  "best_imbalance_strategy": "class_weight",
+  "best_imbalance_config": {
+    "scale_pos_weight": 172.34
+  },
+  "n_features": 21
+}
