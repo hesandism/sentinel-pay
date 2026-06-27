@@ -41,15 +41,34 @@ behavioural features (spending velocity, geographic distance from the last trans
 
 **Imbalance strategy** is selected on **validation PR-AUC** (validation = last 15%
 of train, by time). The winning feature set + strategy are saved to
-`artifacts/phase2/` for the next phase. See the notebook for the comparison table
+`artifacts/phase2/` for the modeling stage. See the notebook for the comparison table
 and written conclusion.
+
+### Phase 2 (continued) — Tuning, Calibration, Threshold & SHAP
+
+The same modeling line, continued from the imbalance comparison into a deployable, explainable scorer:
+
+- [x] Optuna hyperparameter tuning (`src/tuning.py`) — optimised on validation PR-AUC
+- [x] Probability calibration, isotonic vs Platt (`src/calibration.py`) — scores usable as risk levels
+- [x] Cost-based decision threshold (`src/threshold.py`) — minimises $ cost, not F1
+- [x] SHAP explanations, `TreeExplainer` (`src/explain.py`) — global summary + per-transaction reasons
+- [x] Modeling notebook (`notebooks/04_tuning_calibration_shap.ipynb`)
+
+**What each step does:**
+
+| Step | How it works |
+|------|--------------|
+| **Tuning** | Optuna searches LightGBM (depth, leaves, regularisation, …); each trial is scored on the chronological **validation PR-AUC**. The test set is never seen during tuning. |
+| **Calibration** | The model is trained with `scale_pos_weight`, which distorts the score scale. We fit an isotonic **or** Platt (sigmoid) map on the held-out validation fold and keep whichever lowers the **Brier score** — so a "0.8" really means ~80% risk. |
+| **Threshold** | A missed fraud is charged the **full transaction amount**; a false alarm a flat **\$5**. We sweep thresholds and pick the one with the **lowest total dollar cost** — explicitly *not* the F1-maximising point (which treats both errors as equal). |
+| **SHAP** | `TreeExplainer` on the raw LightGBM. `global_summary_plot` ranks population-level drivers; `explain_transaction(row)` returns the top push-fraud / push-legit reasons + calibrated risk score for any single transaction. |
+
+The tuned + calibrated model, chosen threshold and cost matrix are saved to
+`artifacts/phase2/` (alongside the feature/imbalance artifacts) for the next phase.
 
 ### Upcoming Phases
 
-- [ ] Model training & tuning (LightGBM + Optuna)
-- [ ] Calibration & threshold tuning
-- [ ] SHAP explanations & evaluation
-- [ ] API serving & drift monitoring
+- [ ] Phase 3 — API serving & drift monitoring
 
 ## Project Structure
 
@@ -64,14 +83,20 @@ src/
 ├── features.py             # Leakage-safe feature engineering (FeatureEngineer)
 ├── data.py                 # Load splits + chronological validation split
 ├── imbalance.py            # Class-weight vs SMOTE comparison + metrics
-└── artifacts.py            # Persist chosen feature set + imbalance strategy
+├── tuning.py               # Optuna hyperparameter search (validation PR-AUC)
+├── calibration.py          # Isotonic / Platt probability calibration
+├── threshold.py            # Cost-matrix decision-threshold selection
+├── explain.py              # SHAP TreeExplainer (global + per-transaction)
+└── artifacts.py            # Persist feature/imbalance decisions + trained model
 notebooks/
-├── load_and_check.ipynb            # Initial sanity checks
-├── 01_eda_time_split.ipynb         # EDA & time-based split
-├── 02_baseline_lightgbm.ipynb      # Baseline LightGBM (6 raw features)
-└── 03_feature_eng_imbalance.ipynb  # Phase 2: features + imbalance comparison
+├── load_and_check.ipynb              # Initial sanity checks
+├── 01_eda_time_split.ipynb           # EDA & time-based split
+├── 02_baseline_lightgbm.ipynb        # Baseline LightGBM (6 raw features)
+├── 03_feature_eng_imbalance.ipynb    # Phase 2: features + imbalance comparison
+└── 04_tuning_calibration_shap.ipynb  # Phase 2 (cont.): tuning, calibration, threshold, SHAP
 artifacts/
-└── phase2/                 # Saved feature engineer, manifest, comparison table
+└── phase2/                 # Feature engineer + manifests, comparison table,
+                            #   tuned/calibrated model + model manifest
 ```
 
 ## Set Up
