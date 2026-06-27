@@ -9,6 +9,7 @@ jupyter==1.0.0
 scikit-learn==1.5.0
 lightgbm==4.3.0
 imbalanced-learn==0.12.3      # SMOTE / SMOTETomek
+optuna==3.6.1                 # Hyperparameter tuning
 shap==0.45.1                  # Explainability
 scipy==1.13.1
 

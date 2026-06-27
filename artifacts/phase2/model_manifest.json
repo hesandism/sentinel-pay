@@ -1,0 +1,28 @@
+{
+  "best_params": {
+    "n_estimators": 500,
+    "learning_rate": 0.039019212961716274,
+    "num_leaves": 157,
+    "max_depth": 9,
+    "min_child_samples": 111,
+    "subsample": 0.9117712809246715,
+    "subsample_freq": 2,
+    "colsample_bytree": 0.7952908891858085,
+    "reg_alpha": 0.006613785667584596,
+    "reg_lambda": 8.407316478743244,
+    "min_split_gain": 0.0978446327083097
+  },
+  "calibration_method": "isotonic",
+  "decision_threshold": 0.1,
+  "cost_matrix": {
+    "c_fn_fraction_of_amount": 1.0,
+    "c_fp_flat": 5.0
+  },
+  "metrics": {
+    "val_pr_auc_tuned": 0.9714035034197538,
+    "test_pr_auc": 0.9698057696569562,
+    "test_precision": 0.8103555832813475,
+    "test_recall": 0.9629355077835434,
+    "test_cost_per_txn": 0.03314374094078207
+  }
+}

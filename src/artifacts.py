@@ -2,15 +2,23 @@
 SentinelPay — Phase 2 artifact persistence
 ==========================================
 
-Saves the *decisions* made in Phase 2 so Phase 3 (Optuna tuning, calibration,
-threshold tuning, SHAP) can pick them up without re-deriving anything:
+Persists everything Phase 2 produces, in two stages that both land in
+``artifacts/phase2/``:
+
+**Feature/imbalance stage** (``save_phase2_artifacts``) — the *decisions*:
 
 * the chosen **feature set** (ordered list + which columns are categorical),
 * the winning **imbalance strategy** and its config,
 * the fitted ``FeatureEngineer`` (with its train-only encoders),
 * the comparison table for the record.
 
-Artifacts land in ``artifacts/phase2/``.
+**Modeling stage** (``save_phase2_model_artifacts``) — the *trained model*:
+
+* the tuned + calibrated LightGBM (Optuna search, isotonic/Platt calibration),
+* the cost-minimising decision threshold + cost matrix,
+* the raw tree model (kept for SHAP) and held-out metrics.
+
+The downstream API-serving phase loads these without re-deriving anything.
 """
 
 from __future__ import annotations
@@ -55,5 +63,40 @@ def save_phase2_artifacts(
 
     # 3) The comparison table, for the record.
     comparison_df.to_csv(os.path.join(out_dir, "imbalance_comparison.csv"), index=False)
+
+    return out_dir
+
+
+def save_phase2_model_artifacts(
+    base_model,
+    calibrated_model,
+    best_params: Dict,
+    calibration_method: str,
+    decision_threshold: float,
+    cost_matrix: Dict,
+    metrics: Dict,
+    out_dir: str = ARTIFACT_DIR,
+) -> str:
+    """Persist the tuned + calibrated model and the chosen operating point.
+
+    Lands alongside the feature/imbalance artifacts in ``artifacts/phase2/``.
+    Saves enough for the API-serving phase to load a ready-to-score model: the
+    calibrated model (risk scores), the raw tree model (for SHAP), the tuned
+    hyperparameters, and the cost-minimising decision threshold.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+
+    joblib.dump(base_model, os.path.join(out_dir, "model_base.joblib"))
+    joblib.dump(calibrated_model, os.path.join(out_dir, "model_calibrated.joblib"))
+
+    manifest = {
+        "best_params": best_params,
+        "calibration_method": calibration_method,
+        "decision_threshold": float(decision_threshold),
+        "cost_matrix": cost_matrix,
+        "metrics": metrics,
+    }
+    with open(os.path.join(out_dir, "model_manifest.json"), "w") as f:
+        json.dump(manifest, f, indent=2)
 
     return out_dir
