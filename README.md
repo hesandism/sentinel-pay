@@ -66,9 +66,50 @@ The same modeling line, continued from the imbalance comparison into a deployabl
 The tuned + calibrated model, chosen threshold and cost matrix are saved to
 `artifacts/phase2/` (alongside the feature/imbalance artifacts) for the next phase.
 
+### Phase 3 — Experiment Tracking & Model Registry (MLflow)
+
+- [x] Reproducible training script (`src/train.py`) — one command rebuilds the model
+- [x] Every run logs **params, metrics, artifacts and the model** to MLflow
+- [x] Runs are comparable in the MLflow UI (sort by PR-AUC / min-cost)
+- [x] Best model registered as **`SentinelPayFraudModel`** in the Model Registry
+- [x] Promotion via **alias** (`@production`) — the modern, non-deprecated path
+- [x] Manual step-by-step guide (`docs/mlflow_guide.md`)
+
+The notebook pipeline (`04_tuning_calibration_shap.ipynb`) is refactored into a
+single script that re-uses the same Phase 2 modules, so the registered model is
+identical to the notebook's — just reproducible and versioned.
+
+**Logged per run:** model type, split fractions, random seed, imbalance handling
+(`scale_pos_weight`), calibration method, cost matrix, selected threshold, tuned
+hyperparameters · `pr_auc`, `precision`, `recall`, `f1`, `recall_at_precision_80`,
+`min_cost`, `selected_threshold`, cost-per-txn · SHAP summary, feature-importance
+plot + CSV, cost curve, `metrics.json`, `threshold_report.json` · the calibrated
+model (with signature + input example) and the raw LightGBM tree.
+
+#### Quick start
+
+```bash
+# 1. Start the MLflow server (terminal 1, leave it running)
+mlflow server --backend-store-uri sqlite:///mlflow.db --default-artifact-root ./mlruns --host 127.0.0.1 --port 5000
+
+# 2. Open the UI in a browser
+#    http://127.0.0.1:5000
+
+# 3. Train, log, register and promote (terminal 2)
+python src/train.py --data-path data/processed --experiment-name sentinelpay-fraud --model-name SentinelPayFraudModel --register-model --promote
+
+# 4. Load the production model (this is the Phase-4 serving path)
+python -c "import mlflow; mlflow.set_tracking_uri('http://127.0.0.1:5000'); print(mlflow.pyfunc.load_model('models:/SentinelPayFraudModel@production'))"
+```
+
+Run `python src/train.py --help` for all flags (`--no-tune`, `--n-trials`,
+`--subsample`, `--flat-cost`, `--fn-cost/--fp-cost`, …). See
+**[`docs/mlflow_guide.md`](docs/mlflow_guide.md)** for the full walkthrough:
+starting the server, comparing runs, and registering/promoting in the UI.
+
 ### Upcoming Phases
 
-- [ ] Phase 3 — API serving & drift monitoring
+- [ ] Phase 4 — API serving & drift monitoring
 
 ## Project Structure
 
@@ -87,7 +128,14 @@ src/
 ├── calibration.py          # Isotonic / Platt probability calibration
 ├── threshold.py            # Cost-matrix decision-threshold selection
 ├── explain.py              # SHAP TreeExplainer (global + per-transaction)
-└── artifacts.py            # Persist feature/imbalance decisions + trained model
+├── artifacts.py            # Persist feature/imbalance decisions + trained model
+├── metrics.py              # Phase 3: consolidated eval metrics (PR-AUC, recall@p, cost)
+├── evaluate.py             # Phase 3: plot + report generation (SHAP, importance, cost, JSON)
+└── train.py                # Phase 3: reproducible training entry point + MLflow logging
+docs/
+└── mlflow_guide.md         # Phase 3: step-by-step MLflow walkthrough
+reports/                    # Phase 3: generated plots + JSON/CSV reports (git-ignored)
+mlruns/ + mlflow.db         # Phase 3: MLflow artifact store + tracking DB (git-ignored)
 notebooks/
 ├── load_and_check.ipynb              # Initial sanity checks
 ├── 01_eda_time_split.ipynb           # EDA & time-based split
