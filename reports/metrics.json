@@ -1,0 +1,12 @@
+{
+  "val_pr_auc_tuned": 0.9714035034197538,
+  "selected_threshold": 0.1,
+  "test_pr_auc": 0.8711898476247014,
+  "test_roc_auc": 0.9369837481946461,
+  "test_precision": 0.9932546374367622,
+  "test_recall": 0.8732394366197183,
+  "test_f1": 0.9293885601577909,
+  "test_recall_at_precision_80": 0.8739807264640475,
+  "test_cost_per_txn": 0.12445517829620573,
+  "test_flat_cost_per_txn": 0.046264430642492554
+}

@@ -1,0 +1,43 @@
+artifact_path: model
+flavors:
+  python_function:
+    env:
+      conda: conda.yaml
+      virtualenv: python_env.yaml
+    loader_module: mlflow.sklearn
+    model_path: model.pkl
+    predict_fn: predict
+    python_version: 3.11.9
+  sklearn:
+    code: null
+    pickled_model: model.pkl
+    serialization_format: cloudpickle
+    sklearn_version: 1.5.0
+mlflow_version: 2.13.0
+model_size_bytes: 7586034
+model_uuid: bc7afeba924f4481881b1c08cbc03f48
+run_id: 5728f551086c4d7ea43ebecc2ab3d33d
+saved_input_example_info:
+  artifact_path: input_example.json
+  pandas_orient: split
+  type: dataframe
+signature:
+  inputs: '[{"type": "integer", "name": "hour", "required": true}, {"type": "integer",
+    "name": "day_of_week", "required": true}, {"type": "integer", "name": "is_night",
+    "required": true}, {"type": "double", "name": "txn_count_1h", "required": true},
+    {"type": "double", "name": "txn_amount_1h", "required": true}, {"type": "double",
+    "name": "txn_count_24h", "required": true}, {"type": "double", "name": "txn_amount_24h",
+    "required": true}, {"type": "double", "name": "amt_hist_mean", "required": true},
+    {"type": "double", "name": "amt_hist_std", "required": true}, {"type": "double",
+    "name": "amt_zscore", "required": true}, {"type": "double", "name": "dist_from_prev_km",
+    "required": true}, {"type": "double", "name": "time_since_prev_h", "required":
+    true}, {"type": "double", "name": "speed_kmh", "required": true}, {"type": "double",
+    "name": "merchant_freq", "required": true}, {"type": "double", "name": "category_freq",
+    "required": true}, {"type": "double", "name": "category_target_enc", "required":
+    true}, {"type": "double", "name": "merchant_target_enc", "required": true}, {"type":
+    "double", "name": "age", "required": true}, {"type": "double", "name": "amt",
+    "required": true}, {"type": "long", "name": "city_pop", "required": true}, {"type":
+    "string", "name": "gender", "required": true}]'
+  outputs: '[{"type": "tensor", "tensor-spec": {"dtype": "float64", "shape": [-1]}}]'
+  params: null
+utc_time_created: '2026-06-28 09:27:19.621445'
