@@ -107,9 +107,57 @@ Run `python src/train.py --help` for all flags (`--no-tune`, `--n-trials`,
 **[`docs/mlflow_guide.md`](docs/mlflow_guide.md)** for the full walkthrough:
 starting the server, comparing runs, and registering/promoting in the UI.
 
+### Phase 4 — FastAPI scoring API (Step 1)
+
+A small FastAPI app (`src/serve/api.py`) loads the **Production** model from
+MLflow once at startup and scores a single transaction. It exposes:
+
+- `GET /health` — `{"status": "ok", "model_loaded": true}`
+- `POST /score` — takes one transaction (raw Sparkov fields) and returns the
+  fraud probability, a fraud / not-fraud decision, the threshold used, and a few
+  SHAP-style top reasons.
+
+```bash
+# 1. Start the MLflow server (terminal 1, leave it running)
+mlflow server --backend-store-uri sqlite:///mlflow.db --default-artifact-root ./mlruns --host 127.0.0.1 --port 5000
+
+# 2. Start the API (terminal 2). MLFLOW_TRACKING_URI defaults to http://127.0.0.1:5000
+uvicorn src.serve.api:app --host 127.0.0.1 --port 8000
+
+# 3. Test the health check
+curl http://127.0.0.1:8000/health
+
+# 4. Score one transaction
+curl -X POST http://127.0.0.1:8000/score -H "Content-Type: application/json" -d '{
+  "trans_date_trans_time": "2020-06-21 12:14:25",
+  "cc_num": 2703186189652095,
+  "merchant": "fraud_Rippin, Kub and Mann",
+  "category": "misc_net",
+  "amt": 4.97,
+  "first": "Jennifer", "last": "Banks", "gender": "F",
+  "street": "561 Perry Cove", "city": "Moravian Falls", "state": "NC", "zip": 28654,
+  "lat": 36.0788, "long": -81.1781, "city_pop": 3495,
+  "job": "Psychologist, counselling", "dob": "1988-03-09",
+  "trans_num": "0b242abb623afc578575680df30655b9",
+  "unix_time": 1371816865, "merch_lat": 36.011293, "merch_long": -82.048315
+}'
+```
+
+**Config (environment variables):**
+
+| Variable                | Default                  | Meaning                                       |
+| ----------------------- | ------------------------ | --------------------------------------------- |
+| `MLFLOW_TRACKING_URI`   | `http://127.0.0.1:5000`  | Where the MLflow tracking server lives.       |
+| `SENTINELPAY_THRESHOLD` | `0.5`                    | Fallback decision threshold (only used if the saved cost-based threshold can't be read). |
+
+The decision threshold is read from the Phase-2 cost analysis
+(`artifacts/phase2/model_manifest.json` → `decision_threshold`); a transaction
+is flagged **fraud** when `probability >= threshold`. Interactive API docs are at
+`http://127.0.0.1:8000/docs`.
+
 ### Upcoming Phases
 
-- [ ] Phase 4 — API serving & drift monitoring
+- [ ] Phase 4 — API serving & drift monitoring (Step 1 ✅ scoring API)
 
 ## Project Structure
 
@@ -131,7 +179,9 @@ src/
 ├── artifacts.py            # Persist feature/imbalance decisions + trained model
 ├── metrics.py              # Phase 3: consolidated eval metrics (PR-AUC, recall@p, cost)
 ├── evaluate.py             # Phase 3: plot + report generation (SHAP, importance, cost, JSON)
-└── train.py                # Phase 3: reproducible training entry point + MLflow logging
+├── train.py                # Phase 3: reproducible training entry point + MLflow logging
+└── serve/
+    └── api.py              # Phase 4: FastAPI /health + /score (loads Production model)
 docs/
 └── mlflow_guide.md         # Phase 3: step-by-step MLflow walkthrough
 reports/                    # Phase 3: generated plots + JSON/CSV reports (git-ignored)
