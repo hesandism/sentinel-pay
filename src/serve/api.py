@@ -14,11 +14,24 @@ It does three things:
 
 How a request flows through this file
 -------------------------------------
-    raw JSON  ->  pandas DataFrame (1 row)
+    raw JSON  ->  read card's recent history from Redis   (Phase 4, Step 2)
+              ->  compute ONLINE features from that history (velocity / geo)
+              ->  pandas DataFrame (1 row)
               ->  FeatureEngineer.transform()   (the same features used in training)
+              ->  overwrite velocity/geo columns with the Redis online features
               ->  model.predict()               (calibrated fraud probability)
               ->  decision = probability >= threshold
               ->  SHAP top reasons (from the base tree model)
+              ->  save the current transaction to Redis (AFTER scoring, no leakage)
+
+Online features (Phase 4, Step 2)
+---------------------------------
+A single request has no history of its own, so velocity ("how many txns in the
+last hour") and travel ("how far / how fast from the previous txn") features
+would all be zero. To fix that we keep each card's recent transactions in Redis
+and compute those features at request time. See ``redis_store.py`` for details.
+If Redis is down we fall back to cold-start defaults and add a warning to the
+response instead of crashing.
 
 Important design note (why we engineer features here)
 -----------------------------------------------------
@@ -57,6 +70,9 @@ if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
 from explain import FraudExplainer  # noqa: E402  (import after sys.path fix)
+
+# Redis online feature store (Phase 4, Step 2). Lives next to this file.
+from serve import redis_store  # noqa: E402
 
 # --------------------------------------------------------------------------- #
 # Configuration (read from environment variables, with simple defaults).
@@ -136,11 +152,25 @@ class Reason(BaseModel):
     impact: str                       # "pushes_towards_fraud" / "pushes_towards_legit"
 
 
+class OnlineFeatures(BaseModel):
+    # The velocity + geo features computed from the card's recent Redis history.
+    txn_count_1h: int
+    txn_count_24h: int
+    txn_amount_1h: float
+    txn_amount_24h: float
+    dist_from_prev_km: float
+    time_since_prev_h: float
+    speed_kmh: float
+
+
 class ScoreResponse(BaseModel):
     fraud_probability: float
     decision: str                     # "fraud" / "not_fraud"
     threshold: float
+    cold_start: bool                  # True if the card had no history in Redis
+    online_features: OnlineFeatures   # the features computed from recent history
     reasons: list[Reason]
+    warnings: list[str] = []          # e.g. "Redis unavailable, used cold-start ..."
 
 
 # --------------------------------------------------------------------------- #
@@ -161,6 +191,11 @@ feature_names: list[str] = []
 # we read them from the base model at startup and re-apply them in build_features.
 trained_categories: dict[str, list] = {}
 
+# Redis client for the online feature store (Phase 4, Step 2). Created at startup.
+# It may be None / unusable if Redis is down — the /score endpoint handles that
+# gracefully (cold-start defaults + a warning) instead of crashing.
+redis_client = None
+
 
 app = FastAPI(
     title="SentinelPay Fraud Scoring API",
@@ -177,7 +212,7 @@ def load_everything() -> None:
     loudly (instead of the API starting up broken and failing on every request).
     """
     global model, predictor, feature_engineer, explainer, threshold, feature_names
-    global trained_categories
+    global trained_categories, redis_client
 
     # Point MLflow at the tracking server, then load the Production model by alias.
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
@@ -220,14 +255,20 @@ def load_everything() -> None:
     trained_cats = base_model.booster_.pandas_categorical or []
     trained_categories = dict(zip(CATEGORICAL_FEATURES, trained_cats))
 
+    # Create the Redis client for online features. We only build the connection
+    # object here (it connects lazily on first use), so a missing Redis server
+    # does NOT stop the API from starting — /score falls back to cold start.
+    redis_client = redis_store.get_redis_client()
+
     print(f"[startup] Model loaded from {MODEL_URI}")
     print(f"[startup] Decision threshold = {threshold}")
+    print(f"[startup] Redis URL = {redis_store.REDIS_URL}")
 
 
 # --------------------------------------------------------------------------- #
 # Helper: turn one transaction into the engineered features the model expects.
 # --------------------------------------------------------------------------- #
-def build_features(txn: Transaction) -> pd.DataFrame:
+def build_features(txn: Transaction, online_features: dict) -> pd.DataFrame:
     """Convert one transaction into a one-row DataFrame of engineered features.
 
     Steps:
@@ -235,11 +276,14 @@ def build_features(txn: Transaction) -> pd.DataFrame:
       2. ``pd.DataFrame([...])`` -> a DataFrame with exactly one row.
       3. ``feature_engineer.transform(...)`` -> the same engineered columns used
          in training (hour, amt_zscore, merchant_freq, ...).
+      4. Overwrite the velocity/geo columns with the ONLINE features we computed
+         from the card's recent Redis history (see redis_store.py).
 
-    Note: history-based features (velocity, amount z-score, distance) need a
-    card's past transactions. For a single incoming transaction there is no
-    history, so the FeatureEngineer fills those with its neutral defaults (0).
-    That is expected for a one-shot score.
+    Why step 4? For a single incoming transaction the FeatureEngineer has no
+    history, so it fills velocity/distance with neutral 0s. The real recent
+    history lives in Redis, so we replace those columns with the online features
+    computed from it. Everything else (time, encodings, amount, age) is row-local
+    and already correct from transform().
     """
     # 1 + 2: raw JSON -> one-row DataFrame.
     raw_df = pd.DataFrame([txn.dict()])
@@ -250,6 +294,13 @@ def build_features(txn: Transaction) -> pd.DataFrame:
     # Keep only the model's feature columns, in the right order. (transform may
     # also attach the target column when present; it is absent here.)
     features = features[feature_names]
+
+    # 4: replace the history-based columns with the Redis online features. These
+    # column names match the feature manifest exactly, so the model gets real
+    # recent-history signals instead of zeros.
+    for column, value in online_features.items():
+        if column in features.columns:
+            features[column] = value
 
     # Give categorical columns the EXACT set of categories the model trained on
     # (e.g. gender = ["F", "M"]). A one-row request only contains the value it
@@ -274,29 +325,61 @@ def health() -> dict:
     return {"status": "ok", "model_loaded": model is not None}
 
 
+def _read_online_features(txn: Transaction) -> tuple[dict, bool, list[str]]:
+    """Read the card's recent history from Redis and compute online features.
+
+    Returns ``(online_features, cold_start, warnings)``:
+      * online_features — the velocity/geo dict to merge into the feature row.
+      * cold_start      — True if the card had no usable history.
+      * warnings        — any messages to surface (e.g. Redis unavailable).
+
+    Redis is treated as best-effort: if it is unreachable we DO NOT crash. We
+    fall back to cold-start defaults and add a warning instead, so the API stays
+    up even when the cache is down.
+    """
+    current = txn.dict()
+    try:
+        # Read PAST transactions only (the current one is not saved yet).
+        recent = redis_store.get_recent_transactions(txn.cc_num, client=redis_client)
+        online_features = redis_store.compute_online_features(current, recent)
+        cold_start = len(recent) == 0
+        return online_features, cold_start, []
+    except Exception:
+        # Redis is down / unreachable -> score with cold-start defaults + warn.
+        return (
+            dict(redis_store.COLD_START_FEATURES),
+            True,
+            ["Redis unavailable, used cold-start online features"],
+        )
+
+
 @app.post("/score", response_model=ScoreResponse)
 def score(txn: Transaction) -> ScoreResponse:
-    """Score one transaction: probability, decision, and top reasons."""
+    """Score one transaction: probability, decision, online features, reasons."""
     if model is None:
         raise HTTPException(status_code=503, detail="Model is not loaded yet.")
 
-    try:
-        # raw JSON -> engineered features (one row).
-        X = build_features(txn)
+    # 1) Read recent history from Redis and compute online features. This runs
+    #    BEFORE we save the current transaction, so the current txn never counts
+    #    itself (no target leakage).
+    online_features, cold_start, warnings = _read_online_features(txn)
 
-        # Ask the model for the calibrated fraud probability. predict_proba gives
-        # [P(legit), P(fraud)] per row, so we take column 1 (fraud) of row 0.
+    try:
+        # 2) raw JSON + online features -> engineered feature row.
+        X = build_features(txn, online_features)
+
+        # 3) Ask the model for the calibrated fraud probability. predict_proba
+        #    gives [P(legit), P(fraud)] per row; we take column 1 (fraud), row 0.
         probability = float(predictor.predict_proba(X)[:, 1][0])
 
-        # Turn the probability into a decision: fraud if it reaches the threshold.
+        # 4) Turn the probability into a decision: fraud if it reaches threshold.
         decision = "fraud" if probability >= threshold else "not_fraud"
 
-        # SHAP reasons: explain_transaction ranks features by how much they push
-        # the score up (towards fraud) or down (towards legit) for THIS row.
+        # 5) SHAP reasons: rank features by how much they push the score up
+        #    (towards fraud) or down (towards legit) for THIS row.
         explanation = explainer.explain_transaction(X, top_n=5)
         reasons = []
         for _, r in explanation["reasons"].iterrows():
-            # A positive SHAP value pushes the score towards fraud.
             impact = (
                 "pushes_towards_fraud"
                 if r["direction"] == "increases fraud risk"
@@ -306,11 +389,14 @@ def score(txn: Transaction) -> ScoreResponse:
                 Reason(feature=r["feature"], value=float(r["value"]), impact=impact)
             )
 
-        return ScoreResponse(
+        response = ScoreResponse(
             fraud_probability=round(probability, 4),
             decision=decision,
             threshold=threshold,
+            cold_start=cold_start,
+            online_features=OnlineFeatures(**online_features),
             reasons=reasons,
+            warnings=warnings,
         )
 
     except HTTPException:
@@ -320,3 +406,14 @@ def score(txn: Transaction) -> ScoreResponse:
         raise HTTPException(
             status_code=500, detail=f"Prediction failed: {exc}"
         ) from exc
+
+    # 6) Save the current transaction to Redis ONLY AFTER scoring is complete.
+    #    Doing it last guarantees the txn was not part of its own features, and a
+    #    save failure (Redis down) must not break a successful prediction.
+    try:
+        redis_store.save_transaction(txn.cc_num, txn.dict(), client=redis_client)
+    except Exception:
+        if "Redis unavailable, used cold-start online features" not in response.warnings:
+            response.warnings.append("Redis unavailable, transaction not saved to history")
+
+    return response

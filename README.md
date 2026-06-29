@@ -155,6 +155,111 @@ The decision threshold is read from the Phase-2 cost analysis
 is flagged **fraud** when `probability >= threshold`. Interactive API docs are at
 `http://127.0.0.1:8000/docs`.
 
+### Phase 4 — Redis online features (Step 2)
+
+Velocity ("how many transactions in the last hour") and travel ("how far / how
+fast from the previous transaction") features need a card's **recent past**. A
+single API request has no past of its own, so we keep each card's recent
+transactions in **Redis** and compute those features at request time.
+
+`src/serve/redis_store.py` is a tiny helper with three functions:
+
+- `get_recent_transactions(cc_num)` — read a card's recent history
+- `save_transaction(cc_num, txn)` — append the current transaction to history
+- `compute_online_features(current, recent)` — turn history into the velocity/geo features
+
+**Online features computed per request:** `txn_count_1h`, `txn_count_24h`,
+`txn_amount_1h`, `txn_amount_24h`, `dist_from_prev_km`, `time_since_prev_h`,
+`speed_kmh`. They are merged into the feature row before the model runs.
+
+#### Start Redis locally
+
+```bash
+# Easiest: run Redis in Docker (no install needed)
+docker run -d --name sentinelpay-redis -p 6379:6379 redis:7
+
+# Or, if you have Redis installed natively:
+redis-server
+
+# (Optional) check it responds
+redis-cli ping        # -> PONG
+```
+
+Point the API at a different Redis with the `REDIS_URL` environment variable
+(default `redis://localhost:6379/0`).
+
+#### How Redis keys are named
+
+One Redis **list** per card holds its recent transactions:
+
+```
+key   = card:{cc_num}:history          e.g.  card:2703186189652095:history
+value = a small JSON string per txn    {"unix_time":..,"amt":..,"lat":..,"long":..}
+```
+
+We keep only the **last 100** transactions per card (`LTRIM`) and set a **7-day
+TTL** (`EXPIRE`) so inactive cards expire on their own.
+
+#### How cold-start works
+
+The first time a card is seen it has no history in Redis. We then return neutral
+**cold-start defaults** so the model still gets finite values:
+
+```
+txn_count_1h = 0      txn_amount_1h  = 0.0     dist_from_prev_km = 0.0
+txn_count_24h = 0     txn_amount_24h = 0.0     time_since_prev_h = 999.0
+                                               speed_kmh         = 0.0
+```
+
+The response includes `"cold_start": true` for that first transaction, and
+`false` once the card has history. If Redis itself is **unavailable**, we don't
+crash — we score with cold-start defaults and add a warning:
+`"warnings": ["Redis unavailable, used cold-start online features"]`.
+
+#### Why we save the transaction *after* scoring, not before
+
+To avoid **target leakage**, a transaction must never be counted in its own
+features. So `/score` first *reads* history and computes features from previous
+transactions only, *then* scores, and *only after that* saves the current
+transaction to Redis. If we saved before scoring, the brand-new card would
+already have "1 transaction in the last hour" — itself — which is cheating.
+
+#### Updated `/score` response
+
+```json
+{
+  "fraud_probability": 0.82,
+  "decision": "fraud",
+  "threshold": 0.1,
+  "cold_start": false,
+  "online_features": {
+    "txn_count_1h": 2,
+    "txn_count_24h": 5,
+    "txn_amount_1h": 530.25,
+    "txn_amount_24h": 900.10,
+    "dist_from_prev_km": 12.4,
+    "time_since_prev_h": 0.7,
+    "speed_kmh": 17.7
+  },
+  "reasons": [],
+  "warnings": []
+}
+```
+
+#### Quick manual test
+
+A small script sends two transactions for the same card and shows `cold_start`
+flip from `true` to `false` as the velocity features change:
+
+```bash
+# Make sure Redis, MLflow, and the API are all running first.
+python scripts/test_online_features.py
+```
+
+| Variable    | Default                     | Meaning                          |
+| ----------- | --------------------------- | -------------------------------- |
+| `REDIS_URL` | `redis://localhost:6379/0`  | Where the Redis server lives.    |
+
 ### Upcoming Phases
 
 - [ ] Phase 4 — API serving & drift monitoring (Step 1 ✅ scoring API)
@@ -181,7 +286,10 @@ src/
 ├── evaluate.py             # Phase 3: plot + report generation (SHAP, importance, cost, JSON)
 ├── train.py                # Phase 3: reproducible training entry point + MLflow logging
 └── serve/
-    └── api.py              # Phase 4: FastAPI /health + /score (loads Production model)
+    ├── api.py              # Phase 4: FastAPI /health + /score (loads Production model)
+    └── redis_store.py      # Phase 4: Redis online features (recent card history)
+scripts/
+└── test_online_features.py  # Phase 4: manual test (cold_start true -> false)
 docs/
 └── mlflow_guide.md         # Phase 3: step-by-step MLflow walkthrough
 reports/                    # Phase 3: generated plots + JSON/CSV reports (git-ignored)
