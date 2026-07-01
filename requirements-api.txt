@@ -1,0 +1,22 @@
+# Slim runtime deps for the scoring API image (Phase 4).
+# Only what src/serve/api.py + register_model.py actually import at serve time.
+# Versions are pinned to match the full requirements.txt so the pickled Phase-2
+# artifacts (scikit-learn / lightgbm) load without version-mismatch warnings.
+
+# ── Core scoring ────────────────────────────────────────────
+pandas==2.2.2
+numpy==1.26.4
+scikit-learn==1.5.0
+lightgbm==4.3.0
+shap==0.45.1                  # SHAP reasons in /score
+
+# ── MLflow (model registry client + sklearn flavour) ────────
+mlflow==2.13.0
+
+# ── API serving ─────────────────────────────────────────────
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+pydantic==2.7.1
+
+# ── Online features / cache ─────────────────────────────────
+redis==5.0.4

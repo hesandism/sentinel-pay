@@ -1,0 +1,29 @@
+# Keep the build context small and reproducible.
+# The image only needs src/, artifacts/phase2/, and the requirements file.
+
+.venv/
+**/__pycache__/
+**/*.pyc
+
+# Local MLflow store — the container starts its OWN MLflow with a fresh volume,
+# so we must NOT copy your local registry in (it can carry host absolute paths).
+mlflow.db
+mlruns/
+mlartifacts/
+
+# Big, gitignored data — not needed to serve; the registrar uses artifacts/ only.
+data/
+
+# Notebooks, reports, docs — not needed at runtime.
+notebooks/
+reports/
+docs/
+
+# Git / editor / OS noise
+.git/
+.gitignore
+.idea/
+.vscode/
+*.md
+!README.md
+.env

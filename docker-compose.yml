@@ -1,0 +1,95 @@
+# SentinelPay — Phase 4 stack
+# ===========================
+# One command brings up the whole scoring service, reproducibly, from a plain
+# `git clone` — no local data, no local MLflow DB, no "works on my machine".
+#
+#     docker compose up --build
+#
+# Services & start order (enforced by healthchecks + depends_on):
+#
+#   redis      ── in-memory store for each card's recent history (online features)
+#   mlflow     ── tracking server + model registry (its own fresh volume)
+#   registrar  ── ONE-SHOT: logs artifacts/phase2/model_calibrated.joblib into
+#                 MLflow and sets the @production alias, then exits. This is what
+#                 makes the API's `models:/SentinelPayFraudModel@production` load
+#                 succeed on a fresh machine (fixes the "path not found" error).
+#   api        ── FastAPI /score endpoint; starts only AFTER the model is
+#                 registered and Redis is healthy.
+#
+# Data persists across restarts via the named volumes at the bottom.
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  mlflow:
+    build: .                    # reuse the API image; just run a different command
+    # --serve-artifacts + a "mlflow-artifacts:/" default root make the server
+    # proxy ALL artifact uploads/downloads over HTTP. That way the registrar
+    # (uploading the model) and the api (downloading it) go THROUGH the server,
+    # so neither needs the artifact directory mounted locally. Without this, a
+    # logged model's path (e.g. /mlflow/mlartifacts/...) exists only where it was
+    # written and the API gets "No such file or directory" at load time.
+    command: >
+      mlflow server
+      --backend-store-uri sqlite:////mlflow/mlflow.db
+      --artifacts-destination /mlflow/mlartifacts
+      --default-artifact-root mlflow-artifacts:/
+      --serve-artifacts
+      --host 0.0.0.0
+      --port 5000
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow-data:/mlflow     # sqlite DB + the ONLY real copy of artifacts
+    healthcheck:
+      # MLflow 2.13 serves this lightweight endpoint once the server is ready.
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
+
+  registrar:
+    build: .
+    command: ["python", "-m", "src.serve.register_model"]
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+    depends_on:
+      mlflow:
+        condition: service_healthy
+    restart: "no"               # one-shot: register the model, then exit 0
+
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+      registrar:
+        condition: service_completed_successfully   # model must be registered first
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  redis-data:
+  mlflow-data:

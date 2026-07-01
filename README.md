@@ -260,9 +260,90 @@ python scripts/test_online_features.py
 | ----------- | --------------------------- | -------------------------------- |
 | `REDIS_URL` | `redis://localhost:6379/0`  | Where the Redis server lives.    |
 
+### Phase 4 — Latency (Step 3)
+
+Every request is timed. The `/score` response carries a `latency_ms` field (the
+server-side scoring work) and every response carries an `X-Process-Time-Ms`
+header (the full request, including routing/serialization). Per-request timings
+are also logged, so you can watch them live with `docker compose logs -f api`.
+
+Benchmark the endpoint with the included script (run it against the live stack):
+
+```bash
+python scripts/benchmark_latency.py                 # 500 reqs, warm card (steady state)
+python scripts/benchmark_latency.py --new-card-each # 500 reqs, all cold-start (worst case)
+```
+
+**Measured p95 (single-threaded client, Dockerized stack on a dev laptop):**
+
+| Scenario                    | p50     | **p95**  | p99     |
+| --------------------------- | ------- | -------- | ------- |
+| Steady state (same card)    | ~26 ms  | **~32 ms** | ~41 ms |
+| Cold start (new card each)  | ~27 ms  | **~32 ms** | ~41 ms |
+
+**p95 ≈ 32 ms — well under the 100 ms target.** Cold-start requests are no slower
+than warm ones: the Redis history lookup is negligible next to feature
+engineering + the model's `predict_proba` + SHAP, which dominate the ~24 ms of
+server-side work. (Re-run the script to get numbers for your own hardware.)
+
+### Phase 4 — Docker: one-command stack (Step 4)
+
+The steps above run three moving parts by hand (MLflow, Redis, the API) and
+assume the Production model is already registered in **your** local MLflow. That
+is exactly the "works on my machine" gap: a teammate's fresh clone has an *empty*
+MLflow registry (`mlflow.db` / `mlruns/` are git-ignored), so the API's
+`models:/SentinelPayFraudModel@production` lookup fails at startup.
+
+**Docker fixes this.** `docker compose up` builds the whole stack and, before the
+API starts, a one-shot **registrar** logs the committed model
+(`artifacts/phase2/model_calibrated.joblib`) into MLflow and sets the
+`@production` alias. No dataset download, no training run, no local MLflow DB
+required — it reproduces from a plain `git clone`.
+
+```bash
+# Build + start MLflow, Redis, the registrar (one-shot), and the API.
+docker compose up --build
+
+# In another terminal, once the API is healthy:
+curl http://127.0.0.1:8000/health          # -> {"status":"ok","model_loaded":true}
+
+# Score a transaction (same body as Step 1 above):
+curl -X POST http://127.0.0.1:8000/score -H "Content-Type: application/json" -d '{
+  "trans_date_trans_time": "2020-06-21 12:14:25", "cc_num": 2703186189652095,
+  "merchant": "fraud_Rippin, Kub and Mann", "category": "misc_net", "amt": 4.97,
+  "first": "Jennifer", "last": "Banks", "gender": "F",
+  "street": "561 Perry Cove", "city": "Moravian Falls", "state": "NC", "zip": 28654,
+  "lat": 36.0788, "long": -81.1781, "city_pop": 3495,
+  "job": "Psychologist, counselling", "dob": "1988-03-09",
+  "trans_num": "0b242abb623afc578575680df30655b9",
+  "unix_time": 1371816865, "merch_lat": 36.011293, "merch_long": -82.048315
+}'
+
+# Tear down (keeps data in named volumes); add -v to wipe volumes too.
+docker compose down
+```
+
+**What comes up**
+
+| Service     | Port   | Role                                                             |
+| ----------- | ------ | --------------------------------------------------------------- |
+| `mlflow`    | `5000` | Tracking server + model registry (persisted to `mlflow-data`).  |
+| `redis`     | `6379` | Online-feature history store (persisted to `redis-data`).       |
+| `registrar` | —      | One-shot: registers the model + sets `@production`, then exits. |
+| `api`       | `8000` | FastAPI `/score` + `/docs`; starts only after the model exists. |
+
+Inside the compose network the API reaches the other services by name
+(`MLFLOW_TRACKING_URI=http://mlflow:5000`, `REDIS_URL=redis://redis:6379/0`) — no
+absolute host paths anywhere, which is why it runs the same on every machine.
+The registrar is idempotent, so re-running `docker compose up` is always safe.
+
 ### Upcoming Phases
 
-- [ ] Phase 4 — API serving & drift monitoring (Step 1 ✅ scoring API)
+- [x] Phase 4 — Serving API, online features & Docker (MVP)
+  - [x] Step 1 — FastAPI `/score` endpoint
+  - [x] Step 2 — Redis online features (velocity / geo, cold-start handling)
+  - [x] Step 3 — Latency logging + benchmark (p95 ≈ 32 ms, target < 100 ms)
+  - [x] Step 4 — Dockerfile + docker-compose (MLflow + Redis + API)
 
 ## Project Structure
 

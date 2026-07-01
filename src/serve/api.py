@@ -48,14 +48,20 @@ Run it
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
+import time
 
 import joblib
 import mlflow
 import pandas as pd
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
+
+# A dedicated logger so per-request latency lines are easy to spot in the logs.
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("sentinelpay.api")
 
 # --------------------------------------------------------------------------- #
 # Make the Phase-2 modules importable.
@@ -170,6 +176,7 @@ class ScoreResponse(BaseModel):
     cold_start: bool                  # True if the card had no history in Redis
     online_features: OnlineFeatures   # the features computed from recent history
     reasons: list[Reason]
+    latency_ms: float = 0.0           # server-side scoring time for THIS request
     warnings: list[str] = []          # e.g. "Redis unavailable, used cold-start ..."
 
 
@@ -202,6 +209,29 @@ app = FastAPI(
     description="Scores one transaction for fraud using the MLflow Production model.",
     version="0.1.0",
 )
+
+
+# --------------------------------------------------------------------------- #
+# Latency middleware (Phase 4, Step 3)
+# --------------------------------------------------------------------------- #
+@app.middleware("http")
+async def add_process_time(request: Request, call_next):
+    """Measure how long each request takes and report it two ways.
+
+    * ``X-Process-Time-Ms`` response header — visible to every caller / tool.
+    * a log line — so per-request timing shows up in ``docker compose logs api``.
+
+    This wraps the WHOLE request (routing + handler), so it also captures the
+    small FastAPI/serialization overhead, not just the scoring work. The /score
+    handler additionally puts its own ``latency_ms`` in the JSON body.
+    """
+    start = time.perf_counter()
+    response = await call_next(request)
+    elapsed_ms = (time.perf_counter() - start) * 1000.0
+    response.headers["X-Process-Time-Ms"] = f"{elapsed_ms:.2f}"
+    log.info("%s %s -> %s  %.2f ms",
+             request.method, request.url.path, response.status_code, elapsed_ms)
+    return response
 
 
 @app.on_event("startup")
@@ -359,6 +389,10 @@ def score(txn: Transaction) -> ScoreResponse:
     if model is None:
         raise HTTPException(status_code=503, detail="Model is not loaded yet.")
 
+    # Start the scoring clock. We measure the handler's own work (Redis read +
+    # feature engineering + predict + SHAP) and report it as latency_ms below.
+    t_start = time.perf_counter()
+
     # 1) Read recent history from Redis and compute online features. This runs
     #    BEFORE we save the current transaction, so the current txn never counts
     #    itself (no target leakage).
@@ -396,6 +430,7 @@ def score(txn: Transaction) -> ScoreResponse:
             cold_start=cold_start,
             online_features=OnlineFeatures(**online_features),
             reasons=reasons,
+            latency_ms=round((time.perf_counter() - t_start) * 1000.0, 2),
             warnings=warnings,
         )
 
