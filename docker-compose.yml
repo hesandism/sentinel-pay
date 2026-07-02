@@ -16,6 +16,16 @@
 #   api        ── FastAPI /score endpoint; starts only AFTER the model is
 #                 registered and Redis is healthy.
 #
+# Phase 5 adds the streaming pipeline on top of the same image:
+#
+#   redpanda   ── Kafka-compatible broker (no Zookeeper). Holds the
+#                 `transactions` (live feed) and `alerts` (high-risk) topics.
+#   postgres   ── durable sink; every scored transaction lands in a table.
+#   producer   ── ONE-SHOT: replays Sparkov rows in timestamp order into
+#                 `transactions`, then exits.
+#   consumer   ── long-running: reads `transactions`, scores each via the API,
+#                 writes to Postgres, and publishes high-risk ones to `alerts`.
+#
 # Data persists across restarts via the named volumes at the bottom.
 
 services:
@@ -90,6 +100,92 @@ services:
       retries: 5
       start_period: 30s
 
+  # ─────────────────────────────────────────────────────────────────────────
+  # Phase 5 — streaming pipeline
+  # ─────────────────────────────────────────────────────────────────────────
+  redpanda:
+    image: redpandadata/redpanda:v24.1.7
+    # Redpanda is a single-binary, Kafka-API-compatible broker (no Zookeeper).
+    # Two listeners: an INTERNAL one (redpanda:29092) that compose services use,
+    # and an EXTERNAL one (localhost:9092) for clients on your host machine.
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --overprovisioned
+      - --node-id=0
+      - --kafka-addr=INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092
+      - --advertise-kafka-addr=INTERNAL://redpanda:29092,EXTERNAL://localhost:9092
+    ports:
+      - "9092:9092"    # external Kafka listener (host clients)
+      - "9644:9644"    # admin/metrics API
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: sentinel
+      POSTGRES_PASSWORD: sentinel
+      POSTGRES_DB: sentinelpay
+    ports:
+      # Host 5433 -> container 5432. We publish on 5433 to avoid colliding with a
+      # native PostgreSQL install (which commonly squats on the host's 5432).
+      # Inside the compose network services still reach it as `postgres:5432`.
+      - "5433:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sentinel -d sentinelpay"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  producer:
+    build: .
+    command: ["python", "-m", "src.stream.producer"]
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:29092
+      TRANSACTIONS_TOPIC: transactions
+      # Replay knobs (see src/stream/config.py). Override at `docker compose up`.
+      STREAM_CSV: data/processed/test_time_split.csv
+      STREAM_LIMIT: "1000"       # 0 = replay the whole file
+      STREAM_SPEEDUP: "120"
+      STREAM_MAX_DELAY: "1.0"
+    volumes:
+      # data/ is git-ignored and NOT baked into the image, so mount it read-only.
+      - ./data:/app/data:ro
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    restart: "no"                # one-shot: replay the feed, then exit
+
+  consumer:
+    build: .
+    command: ["python", "-m", "src.stream.consumer"]
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:29092
+      TRANSACTIONS_TOPIC: transactions
+      ALERTS_TOPIC: alerts
+      SCORING_API_URL: http://api:8000/score
+      DATABASE_URL: postgresql://sentinel:sentinel@postgres:5432/sentinelpay
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_healthy    # must be able to score before consuming
+    restart: unless-stopped
+
 volumes:
   redis-data:
   mlflow-data:
+  redpanda-data:
+  postgres-data:
