@@ -337,6 +337,105 @@ Inside the compose network the API reaches the other services by name
 absolute host paths anywhere, which is why it runs the same on every machine.
 The registrar is idempotent, so re-running `docker compose up` is always safe.
 
+### Phase 5 — Streaming pipeline (real-time scoring)
+
+Phase 4 scores **one transaction per HTTP request**. Phase 5 turns that into a
+**live feed**: transactions flow through Kafka, get scored continuously, land in
+Postgres, and the high-risk ones are published to an `alerts` topic — the part
+that makes it feel production-grade.
+
+```
+ CSV replay ──▶ [transactions topic] ──▶ consumer ──▶ POST /score  (Redis + model + SHAP)
+ (producer)                                  │                        │
+                                             ├──▶ Postgres  (every scored transaction)
+                                             └──▶ [alerts topic] + alerts table  (high-risk only)
+```
+
+**Design choice — the consumer calls the existing `/score` API** instead of
+re-loading the model. The API already owns model loading, Redis online-feature
+enrichment, feature engineering and SHAP, so reusing it over HTTP guarantees the
+streaming path and the request/response path score **identically** (one source
+of truth, no drift).
+
+**The three moving parts** (`src/stream/`):
+
+| File          | Role                                                                                             |
+| ------------- | ------------------------------------------------------------------------------------------------ |
+| `producer.py` | Replays Sparkov rows **in timestamp order** into `transactions`, keyed by `cc_num`, paced to imitate a live feed. |
+| `consumer.py` | Reads `transactions` → scores via `/score` → writes to Postgres → publishes fraud to `alerts`.    |
+| `db.py`       | Owns the Postgres schema (`scored_transactions`, `alerts`) + idempotent inserts.                  |
+| `config.py`   | One place for broker/topic/DB/API settings (all env-overridable).                                 |
+
+**Message shape.** Each `transactions` message carries the raw transaction and
+the ground-truth label *side by side* — the consumer forwards only the
+transaction to the model (so it never sees the answer) but still stores the label
+in Postgres for later monitoring:
+
+```json
+{ "transaction": { ...raw Sparkov fields... }, "is_fraud": 0 }
+```
+
+**Delivery semantics.** The consumer scores → persists → publishes the alert →
+and only **then** commits the Kafka offset (manual commit). A crash mid-message
+means the offset isn't advanced, so the message is re-processed on restart
+(at-least-once). Postgres' `ON CONFLICT (trans_num) DO NOTHING` makes that
+reprocessing idempotent, so replays never create duplicates.
+
+#### Run the whole stream
+
+```bash
+# Brings up Redis, MLflow, the registrar, the API, PLUS Redpanda, Postgres,
+# the producer (replays the feed once) and the consumer (scores continuously).
+docker compose up --build
+
+# Watch scoring happen live:
+docker compose logs -f consumer
+
+# Watch high-risk alerts come out (from your host, external broker on :9092):
+python scripts/watch_alerts.py
+
+# End-to-end check against the Postgres sink:
+python scripts/verify_stream.py
+#   scored_transactions : 1000
+#     flagged as fraud  : 37
+#   alerts table rows   : 37
+#   --- 5 most recent alerts (high-risk out) --- ...
+```
+
+The `producer` service replays the first **1000** rows of the chronological test
+split by default (`STREAM_LIMIT`; set `0` for the whole file). It exits when the
+replay finishes; the `consumer` keeps running and scores whatever arrives.
+
+**What comes up (Phase 5 additions)**
+
+| Service    | Port   | Role                                                                    |
+| ---------- | ------ | ----------------------------------------------------------------------- |
+| `redpanda` | `9092` | Kafka-compatible broker (no Zookeeper). Holds `transactions` + `alerts`. |
+| `postgres` | `5433` | Durable sink: one row per scored transaction (`scored_transactions`). Host port 5433 → container 5432 (avoids clashing with a native Postgres on 5432). |
+| `producer` | —      | One-shot: replays Sparkov rows in timestamp order, then exits.           |
+| `consumer` | —      | Long-running: scores each transaction and emits alerts.                  |
+
+**Config (environment variables):**
+
+| Variable                  | Default (compose)                                            | Meaning                                        |
+| ------------------------- | ----------------------------------------------------------- | ---------------------------------------------- |
+| `KAFKA_BOOTSTRAP_SERVERS` | `redpanda:29092` (internal) / `localhost:9092` (host)       | Broker address.                                |
+| `TRANSACTIONS_TOPIC`      | `transactions`                                              | The live feed topic.                           |
+| `ALERTS_TOPIC`            | `alerts`                                                    | High-risk output topic.                        |
+| `SCORING_API_URL`         | `http://api:8000/score`                                    | Where the consumer scores each transaction.    |
+| `DATABASE_URL`            | `postgresql://sentinel:sentinel@postgres:5432/sentinelpay`  | Postgres sink.                                 |
+| `STREAM_CSV`              | `data/processed/test_time_split.csv`                       | Which CSV the producer replays.                |
+| `STREAM_LIMIT`            | `1000`                                                     | Rows to replay (`0` = all).                    |
+| `STREAM_SPEEDUP`          | `120`                                                      | Real inter-arrival gap ÷ this factor (pacing). |
+| `STREAM_MAX_DELAY`        | `1.0`                                                      | Cap on any single inter-message sleep (s).     |
+
+To run a producer/consumer **from your host** (outside compose) against the
+published ports, override the addresses, e.g.:
+
+```bash
+KAFKA_BOOTSTRAP_SERVERS=localhost:9092 python -m src.stream.producer --limit 200 --no-pace
+```
+
 ### Upcoming Phases
 
 - [x] Phase 4 — Serving API, online features & Docker (MVP)
@@ -344,6 +443,11 @@ The registrar is idempotent, so re-running `docker compose up` is always safe.
   - [x] Step 2 — Redis online features (velocity / geo, cold-start handling)
   - [x] Step 3 — Latency logging + benchmark (p95 ≈ 32 ms, target < 100 ms)
   - [x] Step 4 — Dockerfile + docker-compose (MLflow + Redis + API)
+- [x] Phase 5 — Streaming pipeline (Kafka/Redpanda → consumer → Postgres + alerts)
+  - [x] Step 1 — Redpanda + Postgres added to docker-compose
+  - [x] Step 2 — Producer replays Sparkov rows in timestamp order (`transactions` topic)
+  - [x] Step 3 — Consumer scores via `/score`, writes Postgres, publishes `alerts`
+  - [x] Step 4 — End-to-end verification (`verify_stream.py`, `watch_alerts.py`)
 
 ## Project Structure
 
@@ -366,11 +470,20 @@ src/
 ├── metrics.py              # Phase 3: consolidated eval metrics (PR-AUC, recall@p, cost)
 ├── evaluate.py             # Phase 3: plot + report generation (SHAP, importance, cost, JSON)
 ├── train.py                # Phase 3: reproducible training entry point + MLflow logging
-└── serve/
-    ├── api.py              # Phase 4: FastAPI /health + /score (loads Production model)
-    └── redis_store.py      # Phase 4: Redis online features (recent card history)
+├── serve/
+│   ├── api.py              # Phase 4: FastAPI /health + /score (loads Production model)
+│   ├── redis_store.py      # Phase 4: Redis online features (recent card history)
+│   └── register_model.py   # Phase 4: one-shot MLflow registrar (Docker bootstrap)
+└── stream/                 # Phase 5: streaming pipeline
+    ├── config.py           #   shared env config (broker, topics, DB, API URL)
+    ├── db.py               #   Postgres schema + idempotent insert helpers
+    ├── producer.py         #   replay Sparkov rows in timestamp order -> transactions
+    └── consumer.py         #   score via /score, write Postgres, publish -> alerts
 scripts/
-└── test_online_features.py  # Phase 4: manual test (cold_start true -> false)
+├── test_online_features.py  # Phase 4: manual test (cold_start true -> false)
+├── benchmark_latency.py     # Phase 4: /score latency benchmark (p50/p95/p99)
+├── verify_stream.py         # Phase 5: end-to-end check of the Postgres sink
+└── watch_alerts.py          # Phase 5: live tail of the alerts topic
 docs/
 └── mlflow_guide.md         # Phase 3: step-by-step MLflow walkthrough
 reports/                    # Phase 3: generated plots + JSON/CSV reports (git-ignored)

@@ -51,6 +51,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import threading
 import time
 
 import joblib
@@ -203,6 +204,16 @@ trained_categories: dict[str, list] = {}
 # gracefully (cold-start defaults + a warning) instead of crashing.
 redis_client = None
 
+# Serializes access to the model + SHAP explainer. FastAPI runs sync endpoints in
+# a threadpool, so requests can overlap (e.g. the streaming consumer plus the
+# container healthcheck, or several clients). The underlying LightGBM booster is
+# NOT thread-safe when predicting on a pandas *categorical* column: concurrent
+# predicts mutate the booster's shared category mapping and raise
+# "could not convert string to float: 'M'". This lock makes prediction one-at-a-
+# time. At our scale (~30 ms/predict) the throughput cost is negligible and the
+# correctness win is essential.
+_predict_lock = threading.Lock()
+
 
 app = FastAPI(
     title="SentinelPay Fraud Scoring API",
@@ -293,6 +304,41 @@ def load_everything() -> None:
     print(f"[startup] Model loaded from {MODEL_URI}")
     print(f"[startup] Decision threshold = {threshold}")
     print(f"[startup] Redis URL = {redis_store.REDIS_URL}")
+
+    # Warm up the model with one throwaway prediction. LightGBM lazily builds its
+    # internal categorical mapping on the FIRST predict; if the first predicts
+    # ever arrive concurrently (a cold server hit by parallel requests) they race
+    # on that initialization and fail with "could not convert string to float".
+    # Doing one predict here, single-threaded at startup, establishes that state
+    # deterministically so the first real requests never race. (The _predict_lock
+    # in /score guards against any residual concurrency.)
+    try:
+        _warmup_model()
+        print("[startup] Model warmed up (categorical mapping established).")
+    except Exception as exc:
+        log.warning("Model warmup skipped: %s", exc)
+
+
+# A representative transaction used only to warm up the model at startup.
+_WARMUP_TXN = {
+    "trans_date_trans_time": "2020-06-21 12:14:25", "cc_num": 2703186189652095,
+    "merchant": "fraud_Rippin, Kub and Mann", "category": "misc_net", "amt": 4.97,
+    "first": "Jennifer", "last": "Banks", "gender": "F",
+    "street": "561 Perry Cove", "city": "Moravian Falls", "state": "NC", "zip": 28654,
+    "lat": 36.0788, "long": -81.1781, "city_pop": 3495,
+    "job": "Psychologist, counselling", "dob": "1988-03-09",
+    "trans_num": "warmup", "unix_time": 1371816865,
+    "merch_lat": 36.011293, "merch_long": -82.048315,
+}
+
+
+def _warmup_model() -> None:
+    """Run one prediction + explanation so LightGBM's category state is set."""
+    txn = Transaction(**_WARMUP_TXN)
+    X = build_features(txn, dict(redis_store.COLD_START_FEATURES))
+    with _predict_lock:
+        predictor.predict_proba(X)
+        explainer.explain_transaction(X, top_n=5)
 
 
 # --------------------------------------------------------------------------- #
@@ -402,16 +448,20 @@ def score(txn: Transaction) -> ScoreResponse:
         # 2) raw JSON + online features -> engineered feature row.
         X = build_features(txn, online_features)
 
-        # 3) Ask the model for the calibrated fraud probability. predict_proba
-        #    gives [P(legit), P(fraud)] per row; we take column 1 (fraud), row 0.
-        probability = float(predictor.predict_proba(X)[:, 1][0])
+        # 3-5) Predict + explain under a lock. The LightGBM booster is not
+        #      thread-safe on categorical input, so we serialize model access to
+        #      avoid concurrent predicts corrupting its shared category mapping.
+        with _predict_lock:
+            # 3) Ask the model for the calibrated fraud probability. predict_proba
+            #    gives [P(legit), P(fraud)] per row; we take column 1 (fraud), row 0.
+            probability = float(predictor.predict_proba(X)[:, 1][0])
+
+            # 5) SHAP reasons: rank features by how much they push the score up
+            #    (towards fraud) or down (towards legit) for THIS row.
+            explanation = explainer.explain_transaction(X, top_n=5)
 
         # 4) Turn the probability into a decision: fraud if it reaches threshold.
         decision = "fraud" if probability >= threshold else "not_fraud"
-
-        # 5) SHAP reasons: rank features by how much they push the score up
-        #    (towards fraud) or down (towards legit) for THIS row.
-        explanation = explainer.explain_transaction(X, top_n=5)
         reasons = []
         for _, r in explanation["reasons"].iterrows():
             impact = (
