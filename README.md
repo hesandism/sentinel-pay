@@ -549,6 +549,81 @@ docker compose run --rm \
 | `MONITOR_BATCH_ROWS` | `500`                                   | "Live batch" = newest N scored transactions. |
 | `MONITOR_MIN_ROWS`   | `100`                                   | Skip checks until this many rows exist.      |
 
+### Phase 7 — Automated retraining & the self-updating loop
+
+Phase 6 detects when the model's world has drifted. Phase 7 closes the loop: the
+system **retrains itself on fresh labelled data and only promotes the new model
+if it provably beats the one in production**. Nothing is promoted on faith — a
+guard-railed gate decides, and a refusal is the guard-rail *working*, not a
+failure.
+
+**Where the retraining data comes from.** Every transaction the streaming
+pipeline scores is already persisted to Postgres (`scored_transactions`) with
+its ground-truth `is_fraud` label *and* the full raw payload in a `raw` JSONB
+column (see `src/stream/db.py`). That table is the retraining corpus: recent,
+labelled, and complete enough to re-run the exact feature pipeline.
+
+**One retrain run** (`src/retrain.py`, entrypoint `python -m src.retrain`):
+
+1. **Pull** recent labelled transactions — from Postgres (live stack) or a CSV
+   (CI / offline).
+2. **Split** chronologically: the newest slice becomes a shared **evaluation
+   window** neither model has seen; everything older joins the training data.
+3. **Train** a challenger with the *exact* Phase-2/3 pipeline (`train.py` — no
+   logic forked).
+4. **Judge** champion (`@production`) vs challenger on the shared window: PR-AUC
+   and cost per transaction. The champion scores with its *own* feature
+   engineer and threshold, so the comparison is honest.
+5. **Gate** (`src/promotion.py`): promote only if PR-AUC improves by a margin
+   *and* cost per transaction does not regress *and* PR-AUC clears an absolute
+   sanity floor. The run, metrics, decision and reasons are logged to MLflow and
+   written to `reports/retrain/promotion_report.json`.
+
+The gate (`src/promotion.py`) is a **pure, unit-tested** function — two metric
+dicts in, a decision with human-readable reasons out — so the rule is tested
+without MLflow, Postgres, or a trained model anywhere near it.
+
+**Run it against the live stack** (Postgres + MLflow already up):
+
+```bash
+# One-shot retrain + gate. Excluded from a plain `docker compose up` via profile.
+docker compose --profile retrain run --rm retrainer
+# Gate decision + full paper trail:
+cat reports/retrain/promotion_report.json
+```
+
+**Triggered on drift.** `scripts/auto_retrain_on_drift.py` watches Prometheus
+for the Phase-6 drift alerts and, when one FIRES, launches the retrainer
+(configurable via `RETRAIN_CMD` — it can equally run `gh workflow run
+retrain.yml`). A cooldown (`RETRAIN_COOLDOWN_S`, default 6h) stops a persistently
+drifting stream from retraining in a hot loop: one drift episode = one retrain,
+then the gate decides.
+
+**CI / synthetic data.** The real Kaggle dataset is git-ignored, so anything
+that must run where the data isn't available uses `src/synthetic_data.py` — a
+Sparkov-*shaped* generator (every raw column the pipeline expects, with a
+learnable fraud signal). Two GitHub Actions workflows use it:
+
+| Workflow             | Trigger                              | What it proves                                                                 |
+| -------------------- | ------------------------------------ | ------------------------------------------------------------------------------ |
+| `.github/workflows/ci.yml`      | every push / PR           | `ruff check` (fast fail) then `pytest -q` on synthetic data.                   |
+| `.github/workflows/retrain.yml` | Mon 03:00 UTC + manual dispatch | The **whole loop** end-to-end: bootstrap a champion, retrain a challenger on a "drifted" recent window, gate, decide — against a throwaway sqlite registry. |
+
+`retrain.yml` runs the *same* `python -m src.retrain` entrypoint that production
+uses, so the automation itself is under test even though the data is synthetic.
+Both retrain workflows **succeed whether the gate promotes or refuses** — they
+fail only if the pipeline itself breaks.
+
+**Config (`retrainer` service / `src.retrain` flags):**
+
+| Variable / flag       | Default                        | Meaning                                              |
+| --------------------- | ------------------------------ | ---------------------------------------------------- |
+| `--recent-days`       | `30`                           | How far back to pull recent labelled transactions.   |
+| `--eval-frac`         | `0.3`                          | Newest fraction of recent data held out for the gate.|
+| `--min-eval-rows`     | `200`                          | Refuse to gate on too small an evaluation window.    |
+| `--tracking-uri`      | `$MLFLOW_TRACKING_URI`         | MLflow registry (sqlite for CI, the stack's for live).|
+| `RETRAIN_COOLDOWN_S`  | `21600` (6h)                   | Min gap between drift-triggered retrains.            |
+
 ### Upcoming Phases
 
 - [x] Phase 4 — Serving API, online features & Docker (MVP)
@@ -565,6 +640,13 @@ docker compose run --rm \
   - [x] Step 1 — Evidently drift monitor (live batches vs training reference, data + target drift)
   - [x] Step 2 — Prometheus metrics (API latency/throughput/alert rate + drift gauges) & Grafana dashboard
   - [x] Step 3 — Drift simulation (`simulate_drift.py`) with a demonstrated firing alert
+- [x] Phase 7 — Automated retraining & the self-updating loop
+  - [x] Step 1 — Raw transaction JSON persisted to Postgres (`raw` JSONB) for retraining
+  - [x] Step 2 — Pure, unit-tested promotion gate (`promotion.py`)
+  - [x] Step 3 — Retrain → challenger → gate → promote entrypoint (`retrain.py`)
+  - [x] Step 4 — Synthetic Sparkov-shaped generator for CI/tests (`synthetic_data.py`)
+  - [x] Step 5 — pytest suite + GitHub Actions (`ci.yml` lint+tests, `retrain.yml` synthetic E2E)
+  - [x] Step 6 — Drift-triggered retraining (`auto_retrain_on_drift.py` + compose `retrainer` service)
 
 ## Project Structure
 
@@ -587,13 +669,16 @@ src/
 ├── metrics.py              # Phase 3: consolidated eval metrics (PR-AUC, recall@p, cost)
 ├── evaluate.py             # Phase 3: plot + report generation (SHAP, importance, cost, JSON)
 ├── train.py                # Phase 3: reproducible training entry point + MLflow logging
+├── promotion.py            # Phase 7: pure, unit-tested champion-vs-challenger gate
+├── synthetic_data.py       # Phase 7: Sparkov-shaped generator for CI/tests
+├── retrain.py              # Phase 7: pull recent data -> train challenger -> gate -> promote
 ├── serve/
 │   ├── api.py              # Phase 4: FastAPI /health + /score (loads Production model)
 │   ├── redis_store.py      # Phase 4: Redis online features (recent card history)
 │   └── register_model.py   # Phase 4: one-shot MLflow registrar (Docker bootstrap)
 ├── stream/                 # Phase 5: streaming pipeline
 │   ├── config.py           #   shared env config (broker, topics, DB, API URL)
-│   ├── db.py               #   Postgres schema + idempotent insert helpers
+│   ├── db.py               #   Postgres schema + inserts (raw JSONB for Phase 7 retraining)
 │   ├── producer.py         #   replay Sparkov rows in timestamp order -> transactions
 │   └── consumer.py         #   score via /score, write Postgres, publish -> alerts
 └── monitor/                # Phase 6: monitoring & drift detection
@@ -607,7 +692,20 @@ scripts/
 ├── benchmark_latency.py     # Phase 4: /score latency benchmark (p50/p95/p99)
 ├── verify_stream.py         # Phase 5: end-to-end check of the Postgres sink
 ├── watch_alerts.py          # Phase 5: live tail of the alerts topic
-└── simulate_drift.py        # Phase 6: manufacture a drifted feed (amt/category/hour/labels)
+├── simulate_drift.py        # Phase 6: manufacture a drifted feed (amt/category/hour/labels)
+└── auto_retrain_on_drift.py # Phase 7: watch Prometheus drift alerts -> trigger the retrainer
+tests/                       # Phase 7: pytest suite (runs on synthetic data)
+├── conftest.py              #   shared fixtures (synthetic frame, tmp registry)
+├── test_promotion.py        #   promotion gate rule (pure, no MLflow)
+├── test_features.py         #   feature engineering shape + leakage-safety
+├── test_metrics.py          #   PR-AUC / recall@p / cost metric helpers
+├── test_threshold.py        #   cost-matrix threshold selection
+├── test_drift_monitor.py    #   drift monitor gauges
+├── test_simulate_drift.py   #   drift simulator output
+└── test_train_smoke.py      #   end-to-end training smoke test
+.github/workflows/           # Phase 7: CI
+├── ci.yml                   #   lint + pytest on every push / PR
+└── retrain.yml              #   scheduled + on-demand synthetic retrain E2E
 docs/
 └── mlflow_guide.md         # Phase 3: step-by-step MLflow walkthrough
 reports/                    # Phase 3: generated plots + JSON/CSV reports (git-ignored)
