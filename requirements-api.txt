@@ -26,3 +26,9 @@ redis==5.0.4
 kafka-python==2.0.2           # Kafka/Redpanda client
 psycopg2-binary==2.9.9        # Postgres sink for scored transactions
 requests==2.32.2              # consumer calls the /score API over HTTP
+
+# ── Monitoring & drift detection (Phase 6) ──────────────────
+# The drift monitor runs from this same image (different command), and the
+# API itself exposes /metrics for Prometheus to scrape.
+evidently==0.4.40             # data-drift / target-drift reports vs training reference
+prometheus-client==0.20.0     # export drift + latency/throughput metrics

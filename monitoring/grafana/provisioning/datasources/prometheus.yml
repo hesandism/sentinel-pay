@@ -1,0 +1,12 @@
+# Grafana datasource provisioning (Phase 6): point Grafana at the Prometheus
+# container automatically, so the dashboard works with zero clicking.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus            # the dashboard JSON references this uid
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false

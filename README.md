@@ -436,6 +436,119 @@ published ports, override the addresses, e.g.:
 KAFKA_BOOTSTRAP_SERVERS=localhost:9092 python -m src.stream.producer --limit 200 --no-pace
 ```
 
+### Phase 6 — Monitoring & drift detection
+
+Phase 5 gave us a live stream of scored transactions. Phase 6 makes the system
+**watch itself**: an Evidently-based drift monitor compares each live batch
+against the training data, Prometheus scrapes the operational + drift metrics,
+Grafana shows them live, and alert rules fire when the world changes.
+
+```
+ scored_transactions (Postgres) ──▶ monitor ──▶ Evidently: live batch vs training reference
+                                       │            │
+                                       │            └──▶ reports/monitoring/drift_latest.html
+                                       └──▶ :8001/metrics ──┐
+                                                            ├──▶ Prometheus ──▶ alert rules
+ api :8000/metrics  (latency, throughput, decisions) ───────┘        │
+                                                                     └──▶ Grafana dashboard
+```
+
+**What gets monitored, and why these columns:**
+
+| Signal                       | Type        | What it catches                                                         |
+| ---------------------------- | ----------- | ----------------------------------------------------------------------- |
+| `amt`                        | data drift  | The amount curve moved (new customer segment, currency bug, attack).    |
+| `category`                   | data drift  | The merchant-category mix changed (one category suddenly dominates).    |
+| `is_fraud` (streamed label)  | target drift| The ground-truth fraud rate moved — the cost-tuned threshold is stale.  |
+| request latency / throughput | operational | The service itself degrading (Redis down, CPU starvation...).           |
+| alert rate                   | operational | The model flagging far more than the sub-1% clean baseline.             |
+
+The monitor (`src/monitor/drift_monitor.py`) loops every 30s: it pulls the last
+**500** scored transactions from Postgres (the "live batch"), runs Evidently's
+`DataDriftPreset` + `TargetDriftPreset` against a stratified sample of the
+training split, saves the full HTML report to
+`reports/monitoring/drift_latest.html`, and exposes the headline numbers as
+Prometheus gauges (`sentinelpay_dataset_drift`, `sentinelpay_drift_share`,
+per-column scores...). The API now also serves `GET /metrics` with request
+counters, a latency histogram, and fraud/not-fraud decision counters.
+
+Two drift-monitoring decisions worth calling out (both are classic production
+false-positive traps):
+
+- **Seasonality-conditioned reference.** A batch of consecutive transactions
+  spans only a few hours, and night traffic genuinely differs from the all-day
+  average — naively comparing a 2am–5am batch against an all-hours reference
+  flags drift on *every clean batch*. The monitor therefore restricts the
+  reference to the same hours of day the live batch covers (night vs training
+  nights), with the reference pre-sampled per hour so every hour stays
+  well-populated.
+- **Distance tests, not p-values.** For small batches Evidently's auto-picked
+  K-S / chi-square p-value tests flag any sampling noise as "drift". The
+  monitor pins magnitude-based tests instead (normed Wasserstein for `amt` at
+  0.15, Jensen–Shannon for `category` at 0.1 — set above the clean-replay
+  baseline, ~20x below the simulated drift): they answer "did it move a lot?",
+  which is what's worth waking someone up for.
+
+**Alert rules** (`monitoring/alerts.yml`, visible at
+`http://localhost:9090/alerts`): `DataDriftDetected`, `TargetDriftDetected`,
+`HighAlertRate` (>10% flagged for 2 min; clean baseline <1%),
+`HighScoringLatency` (p95 > 500 ms; baseline ~48 ms), and `DriftMonitorStale`
+(the monitor itself went quiet — a watchdog for the watchdog).
+
+#### Run it
+
+```bash
+# Everything from Phases 4+5, PLUS the monitor, Prometheus and Grafana:
+docker compose up --build -d
+
+# Live dashboard (anonymous access, provisioned automatically):
+#   http://localhost:3000/d/sentinelpay
+# Prometheus + alert states:
+#   http://localhost:9090/alerts
+# Latest Evidently report (after the first check):
+#   reports/monitoring/drift_latest.html
+```
+
+While the normal replay streams through, the dashboard shows throughput,
+p50/p95 latency (~48 ms p95), a near-zero alert rate — and every drift panel
+green.
+
+#### Demonstrate a drift alert
+
+```bash
+# 1) Manufacture a drifted feed: amounts x4, 60% of rows forced into
+#    shopping_net, timestamps shifted +8h, fraud upsampled to 12%.
+python scripts/simulate_drift.py
+
+# 2) Replay it through the SAME pipeline as normal traffic:
+docker compose run --rm \
+  -e STREAM_CSV=data/processed/drifted_stream.csv -e STREAM_LIMIT=0 producer
+
+# 3) Within a minute or two:
+#    - Grafana: "Data drift" and "Target drift" flip to DRIFT, the alert rate
+#      spikes, per-column drift scores jump.
+#    - Prometheus: DataDriftDetected + TargetDriftDetected go PENDING -> FIRING.
+#    - reports/monitoring/drift_latest.html shows the full Evidently breakdown.
+```
+
+**What comes up (Phase 6 additions)**
+
+| Service      | Port   | Role                                                                   |
+| ------------ | ------ | ---------------------------------------------------------------------- |
+| `monitor`    | `8001` | Evidently drift checks every 30s; exposes drift gauges on `/metrics`.  |
+| `prometheus` | `9090` | Scrapes `api` + `monitor` every 5s; evaluates the alert rules.          |
+| `grafana`    | `3000` | Pre-provisioned live dashboard (datasource + dashboard auto-loaded).    |
+
+**Config (environment variables, `monitor` service):**
+
+| Variable             | Default (compose)                       | Meaning                                      |
+| -------------------- | --------------------------------------- | -------------------------------------------- |
+| `REFERENCE_CSV`      | `data/processed/train_time_split.csv`   | Training reference for drift comparison.     |
+| `REFERENCE_SAMPLE_PER_HOUR` | `1000`                           | Reference rows kept per hour of day (stratified). |
+| `MONITOR_INTERVAL_S` | `30`                                    | Seconds between drift checks.                |
+| `MONITOR_BATCH_ROWS` | `500`                                   | "Live batch" = newest N scored transactions. |
+| `MONITOR_MIN_ROWS`   | `100`                                   | Skip checks until this many rows exist.      |
+
 ### Upcoming Phases
 
 - [x] Phase 4 — Serving API, online features & Docker (MVP)
@@ -448,6 +561,10 @@ KAFKA_BOOTSTRAP_SERVERS=localhost:9092 python -m src.stream.producer --limit 200
   - [x] Step 2 — Producer replays Sparkov rows in timestamp order (`transactions` topic)
   - [x] Step 3 — Consumer scores via `/score`, writes Postgres, publishes `alerts`
   - [x] Step 4 — End-to-end verification (`verify_stream.py`, `watch_alerts.py`)
+- [x] Phase 6 — Monitoring & drift detection (Evidently + Prometheus + Grafana)
+  - [x] Step 1 — Evidently drift monitor (live batches vs training reference, data + target drift)
+  - [x] Step 2 — Prometheus metrics (API latency/throughput/alert rate + drift gauges) & Grafana dashboard
+  - [x] Step 3 — Drift simulation (`simulate_drift.py`) with a demonstrated firing alert
 
 ## Project Structure
 
@@ -474,16 +591,23 @@ src/
 │   ├── api.py              # Phase 4: FastAPI /health + /score (loads Production model)
 │   ├── redis_store.py      # Phase 4: Redis online features (recent card history)
 │   └── register_model.py   # Phase 4: one-shot MLflow registrar (Docker bootstrap)
-└── stream/                 # Phase 5: streaming pipeline
-    ├── config.py           #   shared env config (broker, topics, DB, API URL)
-    ├── db.py               #   Postgres schema + idempotent insert helpers
-    ├── producer.py         #   replay Sparkov rows in timestamp order -> transactions
-    └── consumer.py         #   score via /score, write Postgres, publish -> alerts
+├── stream/                 # Phase 5: streaming pipeline
+│   ├── config.py           #   shared env config (broker, topics, DB, API URL)
+│   ├── db.py               #   Postgres schema + idempotent insert helpers
+│   ├── producer.py         #   replay Sparkov rows in timestamp order -> transactions
+│   └── consumer.py         #   score via /score, write Postgres, publish -> alerts
+└── monitor/                # Phase 6: monitoring & drift detection
+    └── drift_monitor.py    #   Evidently checks vs training reference -> Prometheus gauges
+monitoring/                 # Phase 6: Prometheus + Grafana configuration
+├── prometheus.yml          #   scrape api:8000 + monitor:8001 every 5s
+├── alerts.yml              #   drift + operational alert rules
+└── grafana/                #   auto-provisioned datasource + live dashboard
 scripts/
 ├── test_online_features.py  # Phase 4: manual test (cold_start true -> false)
 ├── benchmark_latency.py     # Phase 4: /score latency benchmark (p50/p95/p99)
 ├── verify_stream.py         # Phase 5: end-to-end check of the Postgres sink
-└── watch_alerts.py          # Phase 5: live tail of the alerts topic
+├── watch_alerts.py          # Phase 5: live tail of the alerts topic
+└── simulate_drift.py        # Phase 6: manufacture a drifted feed (amt/category/hour/labels)
 docs/
 └── mlflow_guide.md         # Phase 3: step-by-step MLflow walkthrough
 reports/                    # Phase 3: generated plots + JSON/CSV reports (git-ignored)

@@ -58,6 +58,7 @@ import joblib
 import mlflow
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Request
+from prometheus_client import Counter, Histogram, make_asgi_app
 from pydantic import BaseModel
 
 # A dedicated logger so per-request latency lines are easy to spot in the logs.
@@ -155,7 +156,9 @@ class Transaction(BaseModel):
 
 class Reason(BaseModel):
     feature: str                      # which engineered feature
-    value: float                      # its value for this transaction
+    # Numeric features report their number; categorical features (e.g. gender)
+    # report the category itself ("M"/"F") — float('M') is what used to 500.
+    value: float | str
     impact: str                       # "pushes_towards_fraud" / "pushes_towards_legit"
 
 
@@ -221,6 +224,46 @@ app = FastAPI(
     version="0.1.0",
 )
 
+# --------------------------------------------------------------------------- #
+# Prometheus metrics (Phase 6)
+# --------------------------------------------------------------------------- #
+# The operational view of the service: how much traffic, how fast, and how
+# often we flag fraud. Prometheus scrapes these from GET /metrics; the alert
+# rate is then a PromQL ratio of the two counters below:
+#
+#     rate(sentinelpay_decisions_total{decision="fraud"}[5m])
+#       / rate(sentinelpay_scored_transactions_total[5m])
+REQUESTS_TOTAL = Counter(
+    "sentinelpay_http_requests_total",
+    "HTTP requests handled, by path / method / status code.",
+    ["path", "method", "status"],
+)
+REQUEST_LATENCY = Histogram(
+    "sentinelpay_request_latency_seconds",
+    "End-to-end request latency (middleware-measured), by path.",
+    ["path"],
+    # Buckets chosen around the Phase-4 benchmark (p95 ≈ 32 ms) so the
+    # histogram_quantile estimate stays sharp where our latency actually lives.
+    buckets=(0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.25, 0.5, 1.0, 2.5),
+)
+SCORED_TOTAL = Counter(
+    "sentinelpay_scored_transactions_total",
+    "Transactions successfully scored by /score.",
+)
+DECISIONS_TOTAL = Counter(
+    "sentinelpay_decisions_total",
+    "Scoring decisions, by outcome ('fraud' / 'not_fraud').",
+    ["decision"],
+)
+
+# Only label with paths we actually serve — anything else (bots probing
+# /admin, typos, ...) collapses into "other" so label cardinality stays bounded.
+_KNOWN_PATHS = {"/score", "/health", "/metrics"}
+
+# Standard Prometheus text endpoint. Mounted as a sub-app so the client library
+# handles content-type and encoding for us.
+app.mount("/metrics", make_asgi_app())
+
 
 # --------------------------------------------------------------------------- #
 # Latency middleware (Phase 4, Step 3)
@@ -242,6 +285,13 @@ async def add_process_time(request: Request, call_next):
     response.headers["X-Process-Time-Ms"] = f"{elapsed_ms:.2f}"
     log.info("%s %s -> %s  %.2f ms",
              request.method, request.url.path, response.status_code, elapsed_ms)
+
+    # Feed the same measurement into Prometheus (Phase 6).
+    path = request.url.path if request.url.path in _KNOWN_PATHS else "other"
+    REQUESTS_TOTAL.labels(
+        path=path, method=request.method, status=str(response.status_code)
+    ).inc()
+    REQUEST_LATENCY.labels(path=path).observe(elapsed_ms / 1000.0)
     return response
 
 
@@ -462,6 +512,8 @@ def score(txn: Transaction) -> ScoreResponse:
 
         # 4) Turn the probability into a decision: fraud if it reaches threshold.
         decision = "fraud" if probability >= threshold else "not_fraud"
+        SCORED_TOTAL.inc()
+        DECISIONS_TOTAL.labels(decision=decision).inc()
         reasons = []
         for _, r in explanation["reasons"].iterrows():
             impact = (
@@ -469,8 +521,14 @@ def score(txn: Transaction) -> ScoreResponse:
                 if r["direction"] == "increases fraud risk"
                 else "pushes_towards_legit"
             )
+            # Categorical features (gender) carry a string value; keep it as-is
+            # instead of crashing on float("M").
+            try:
+                value = float(r["value"])
+            except (TypeError, ValueError):
+                value = str(r["value"])
             reasons.append(
-                Reason(feature=r["feature"], value=float(r["value"]), impact=impact)
+                Reason(feature=r["feature"], value=value, impact=impact)
             )
 
         response = ScoreResponse(

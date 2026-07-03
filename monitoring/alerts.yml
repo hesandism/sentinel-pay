@@ -1,0 +1,83 @@
+# SentinelPay — Prometheus alerting rules (Phase 6)
+# ==================================================
+# Fire when the model's world changes (drift) or the service degrades (ops).
+# We keep Alertmanager out of the stack to stay simple: firing alerts are
+# visible in the Prometheus UI (http://localhost:9090/alerts), on Prometheus'
+# built-in ALERTS metric, and in the Grafana dashboard's "Firing alerts" panel.
+
+groups:
+  - name: sentinelpay-drift
+    rules:
+      # The Evidently check said the live feature distributions no longer look
+      # like training data. "for: 1m" = two consecutive 30s checks must agree,
+      # so one noisy batch cannot page anyone.
+      - alert: DataDriftDetected
+        expr: sentinelpay_dataset_drift == 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Data drift detected on the live transaction stream"
+          description: >-
+            Evidently flagged dataset-level drift vs the training reference.
+            See sentinelpay_drift_share for how many columns moved, and
+            reports/monitoring/drift_latest.html for the full report.
+
+      # The ground-truth fraud-label rate moved away from training. The model's
+      # decision threshold was cost-tuned for the OLD rate, so this means the
+      # threshold (and possibly the model) needs revisiting.
+      - alert: TargetDriftDetected
+        expr: sentinelpay_target_drift_detected == 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Target (fraud-label) drift detected"
+          description: >-
+            The live fraud-label distribution drifted from the training
+            reference. Re-check the decision threshold and consider retraining.
+
+      # The monitor itself went quiet — a monitoring system that can silently
+      # stop monitoring is worse than none at all.
+      - alert: DriftMonitorStale
+        expr: time() - sentinelpay_monitor_last_check_timestamp_seconds > 300
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Drift monitor has not completed a check in 5+ minutes"
+          description: >-
+            The drift monitor's last completed check is stale. Check
+            `docker compose logs monitor`.
+
+  - name: sentinelpay-operational
+    rules:
+      # Baseline alert rate on clean replay traffic is well under 1%.
+      # Sustained >10% means either an attack wave or (more likely) upstream
+      # drift pushing scores up — either way a human should look.
+      - alert: HighAlertRate
+        expr: >-
+          sum(rate(sentinelpay_decisions_total{decision="fraud"}[5m]))
+            / sum(rate(sentinelpay_scored_transactions_total[5m])) > 0.10
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Fraud alert rate above 10% for 2 minutes"
+          description: >-
+            {{ $value | humanizePercentage }} of scored transactions are being
+            flagged as fraud (baseline <1%).
+
+      # Phase-4 benchmark: p95 ≈ 32 ms. Ten times that, sustained, means the
+      # scoring path is unhealthy (Redis down, model reload, CPU starvation).
+      - alert: HighScoringLatency
+        expr: >-
+          histogram_quantile(0.95,
+            sum(rate(sentinelpay_request_latency_seconds_bucket{path="/score"}[5m])) by (le)
+          ) > 0.5
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "/score p95 latency above 500 ms for 2 minutes"
+          description: "p95 is {{ $value | humanizeDuration }} (baseline ~32 ms)."

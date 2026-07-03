@@ -19,6 +19,9 @@ notebooks/
 reports/
 docs/
 
+# Phase 6 monitoring configs are bind-mounted by docker-compose, not baked in.
+monitoring/
+
 # Git / editor / OS noise
 .git/
 .gitignore

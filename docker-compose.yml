@@ -1,5 +1,5 @@
-# SentinelPay — Phase 4 stack
-# ===========================
+# SentinelPay — full stack (Phases 4–6)
+# ======================================
 # One command brings up the whole scoring service, reproducibly, from a plain
 # `git clone` — no local data, no local MLflow DB, no "works on my machine".
 #
@@ -25,6 +25,15 @@
 #                 `transactions`, then exits.
 #   consumer   ── long-running: reads `transactions`, scores each via the API,
 #                 writes to Postgres, and publishes high-risk ones to `alerts`.
+#
+# Phase 6 adds monitoring & drift detection:
+#
+#   monitor    ── compares the latest batch of scored transactions (Postgres)
+#                 against the training reference with Evidently; exposes drift
+#                 gauges on :8001/metrics and writes HTML reports.
+#   prometheus ── scrapes api:8000/metrics + monitor:8001/metrics, evaluates
+#                 the drift/ops alert rules (http://localhost:9090/alerts).
+#   grafana    ── pre-provisioned live dashboard (http://localhost:3000).
 #
 # Data persists across restarts via the named volumes at the bottom.
 
@@ -184,8 +193,64 @@ services:
         condition: service_healthy    # must be able to score before consuming
     restart: unless-stopped
 
+  # ─────────────────────────────────────────────────────────────────────────
+  # Phase 6 — monitoring & drift detection
+  # ─────────────────────────────────────────────────────────────────────────
+  monitor:
+    build: .                    # same image again; just a different command
+    command: ["python", "-m", "src.monitor.drift_monitor"]
+    ports:
+      - "8001:8001"             # Prometheus metrics (drift gauges)
+    environment:
+      DATABASE_URL: postgresql://sentinel:sentinel@postgres:5432/sentinelpay
+      REFERENCE_CSV: data/processed/train_time_split.csv
+      # Check every 30s against the last 500 scored transactions.
+      MONITOR_INTERVAL_S: "30"
+      MONITOR_BATCH_ROWS: "500"
+      MONITOR_MIN_ROWS: "100"
+    volumes:
+      # Training reference CSV (git-ignored, so mounted like the producer's).
+      - ./data:/app/data:ro
+      # Evidently HTML reports land on the host for easy opening in a browser.
+      - ./reports/monitoring:/app/reports/monitoring
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      - api
+      - monitor
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    ports:
+      - "3000:3000"
+    environment:
+      # Demo-only auth: open the dashboard with zero login friction. Anyone on
+      # localhost is an admin — do NOT ship this outside a local demo.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+    volumes:
+      # Auto-provision the Prometheus datasource + the SentinelPay dashboard.
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
 volumes:
   redis-data:
   mlflow-data:
   redpanda-data:
   postgres-data:
+  prometheus-data:
+  grafana-data:
