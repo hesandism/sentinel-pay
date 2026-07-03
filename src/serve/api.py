@@ -160,6 +160,11 @@ class Reason(BaseModel):
     # report the category itself ("M"/"F") — float('M') is what used to 500.
     value: float | str
     impact: str                       # "pushes_towards_fraud" / "pushes_towards_legit"
+    # Signed SHAP contribution (log-odds units). Positive pushes towards fraud.
+    # Phase 8: the dashboard draws reason bars with REAL lengths from this —
+    # without it only the rank survives serialization. Defaults to 0.0 so old
+    # clients (and old alert rows) stay valid.
+    shap_value: float = 0.0
 
 
 class OnlineFeatures(BaseModel):
@@ -528,7 +533,12 @@ def score(txn: Transaction) -> ScoreResponse:
             except (TypeError, ValueError):
                 value = str(r["value"])
             reasons.append(
-                Reason(feature=r["feature"], value=value, impact=impact)
+                Reason(
+                    feature=r["feature"],
+                    value=value,
+                    impact=impact,
+                    shap_value=round(float(r["shap"]), 5),
+                )
             )
 
         response = ScoreResponse(

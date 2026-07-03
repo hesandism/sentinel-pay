@@ -1,4 +1,4 @@
-# SentinelPay — full stack (Phases 4–6)
+# SentinelPay — full stack (Phases 4–8)
 # ======================================
 # One command brings up the whole scoring service, reproducibly, from a plain
 # `git clone` — no local data, no local MLflow DB, no "works on my machine".
@@ -34,6 +34,12 @@
 #   prometheus ── scrapes api:8000/metrics + monitor:8001/metrics, evaluates
 #                 the drift/ops alert rules (http://localhost:9090/alerts).
 #   grafana    ── pre-provisioned live dashboard (http://localhost:3000).
+#
+# Phase 8 adds the demo-facing dashboard:
+#
+#   dashboard  ── Streamlit app (http://localhost:8501): live transaction
+#                 stream, fraud alerts with per-alert SHAP explanations, model
+#                 metrics, drift status and the last retraining gate decision.
 #
 # Data persists across restarts via the named volumes at the bottom.
 
@@ -162,8 +168,10 @@ services:
     environment:
       KAFKA_BOOTSTRAP_SERVERS: redpanda:29092
       TRANSACTIONS_TOPIC: transactions
-      # Replay knobs (see src/stream/config.py). Override at `docker compose up`.
-      STREAM_CSV: data/processed/test_time_split.csv
+      # Replay knobs (see src/stream/config.py). Override at `docker compose up`
+      # or in a .env file — e.g. point STREAM_CSV at a synthetic feed
+      # (src/synthetic_data.py) when the Kaggle dataset is not downloaded.
+      STREAM_CSV: ${STREAM_CSV:-data/processed/test_time_split.csv}
       STREAM_LIMIT: "1000"       # 0 = replay the whole file
       STREAM_SPEEDUP: "120"
       STREAM_MAX_DELAY: "1.0"
@@ -203,7 +211,7 @@ services:
       - "8001:8001"             # Prometheus metrics (drift gauges)
     environment:
       DATABASE_URL: postgresql://sentinel:sentinel@postgres:5432/sentinelpay
-      REFERENCE_CSV: data/processed/train_time_split.csv
+      REFERENCE_CSV: ${REFERENCE_CSV:-data/processed/train_time_split.csv}
       # Check every 30s against the last 500 scored transactions.
       MONITOR_INTERVAL_S: "30"
       MONITOR_BATCH_ROWS: "500"
@@ -246,6 +254,37 @@ services:
       - grafana-data:/var/lib/grafana
     depends_on:
       - prometheus
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Phase 8 — Streamlit dashboard (the demo front door)
+  # ─────────────────────────────────────────────────────────────────────────
+  # Reads Postgres (stream + alerts), Prometheus (drift gauges) and MLflow
+  # (which version holds @production). Its own slim image — see
+  # Dockerfile.dashboard — so it skips the heavy ML dependencies entirely.
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    ports:
+      - "8501:8501"
+    environment:
+      DATABASE_URL: postgresql://sentinel:sentinel@postgres:5432/sentinelpay
+      PROMETHEUS_URL: http://prometheus:9090
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+    volumes:
+      # Offline metrics + the Phase-7 promotion gate report, straight off the
+      # host so a retrain run shows up on the next dashboard refresh.
+      - ./reports:/app/reports:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
 
   # ─────────────────────────────────────────────────────────────────────────
   # Phase 7 — automated retraining (opt-in: `--profile retrain`)

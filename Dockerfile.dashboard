@@ -1,0 +1,30 @@
+# SentinelPay dashboard — Phase 8
+# ================================
+# Deliberately NOT the main image: the dashboard only talks to Postgres,
+# Prometheus and MLflow over HTTP/SQL, so it skips the whole ML stack
+# (lightgbm/shap/mlflow/evidently) and builds in a fraction of the time.
+
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+# curl is only for the compose healthcheck.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY requirements-dashboard.txt ./
+RUN pip install --no-cache-dir -r requirements-dashboard.txt
+
+# The app + the pinned light theme. reports/ (offline metrics, gate report) is
+# mounted read-only by docker-compose, not baked in.
+COPY .streamlit/ ./.streamlit/
+COPY src/dashboard/ ./src/dashboard/
+
+EXPOSE 8501
+
+CMD ["streamlit", "run", "src/dashboard/app.py", "--server.port", "8501", "--server.address", "0.0.0.0"]

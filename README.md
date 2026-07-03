@@ -1,8 +1,108 @@
-# SentinelPay
+# SentinelPay 🛡️
 
-SentinelPay is a production-style machine-learning system that detects fraudulent card 
-transactions in real time. Transactions flow through a streaming pipeline, get enriched with 
-behavioural features (spending velocity, geographic distance from the last transaction, deviation from a card’s normal spend), and are scored by a gradient-boosted model served behind a low latency API. Every prediction comes with a SHAP explanation of why it was flagged. The system continuously monitors incoming data for drift, and when the model’s reliability decays it automatically retrains, validates, and promotes a new version - the full MLOps loop, not just a notebook. 
+**Real-time card-fraud detection with the full MLOps loop — not just a notebook.**
+
+Transactions flow through a streaming pipeline, get enriched with behavioural
+features (spending velocity, geographic distance from the last transaction,
+deviation from a card's normal spend), and are scored by a calibrated
+gradient-boosted model behind a low-latency API. Every alert ships with a SHAP
+explanation of *why*. The system watches its own inputs for drift and, when the
+world changes, **retrains, validates against the champion, and promotes a new
+model only if it provably wins** — automatically.
+
+<!-- 🎬 Record the demo GIF with the script in docs/demo.md, save it as
+     docs/media/demo.gif, then uncomment:
+![SentinelPay live dashboard](docs/media/demo.gif)
+-->
+
+## Headline results
+
+Evaluated on a strictly chronological hold-out (370k transactions, final 4
+months — the model never sees the future):
+
+| Metric | Value | Why it matters |
+|---|---|---|
+| **PR-AUC** | **0.871** | The headline metric at a 0.52% fraud rate (accuracy is useless here) |
+| Precision @ chosen threshold | 0.993 | 8 false alarms across 370k transactions |
+| Recall @ chosen threshold | 0.873 | Catches 7 of every 8 fraudulent transactions |
+| Recall @ 80% precision | 0.874 | Quality holds across the operating range |
+| Cost per transaction | $0.124 | Threshold chosen by an amount-aware cost matrix, not by F1 |
+| Scoring latency (p95) | ≈ 32 ms | Full pipeline: Redis features → model → SHAP reasons |
+
+## The 60-second tour
+
+```bash
+git clone <this-repo> && cd sentinel-pay
+docker compose up --build          # the whole stack, one command
+```
+
+Then open **http://localhost:8501** — the live dashboard: transaction stream,
+flagged frauds with per-alert SHAP explanations, model metrics and drift status.
+
+The stack registers the committed model into MLflow by itself — a fresh clone
+scores transactions with **no dataset, no training run, no setup**. To also see
+the *live stream*, give the producer a feed to replay:
+
+```bash
+# Option A — the real thing: put the Kaggle Sparkov CSVs under data/ and run
+# the Phase-1 split notebook (produces data/processed/*.csv), then:
+docker compose up producer
+
+# Option B — no dataset: synthesize a Sparkov-shaped feed (30 seconds):
+python src/synthetic_data.py --rows 20000 --start 2020-08-01 --days 14 \
+    --out data/processed/synthetic_feed.csv
+STREAM_CSV=data/processed/synthetic_feed.csv docker compose up producer
+```
+
+**Every console in the stack:**
+
+| URL | What you see |
+|---|---|
+| http://localhost:8501 | **Dashboard** — live stream, alerts + SHAP, model & drift (Phase 8) |
+| http://localhost:8000/docs | Scoring API — try `/score` interactively |
+| http://localhost:5000 | MLflow — experiment runs + model registry (`@production` alias) |
+| http://localhost:3000 | Grafana — ops dashboard (latency, throughput, drift gauges) |
+| http://localhost:9090/alerts | Prometheus — drift & operational alert rules |
+
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph stream["Streaming (Phase 5)"]
+        CSV["CSV replay<br/>(producer)"] --> RP["Redpanda<br/><i>transactions</i> topic"]
+        RP --> CONS[consumer]
+    end
+
+    subgraph serving["Serving (Phase 4)"]
+        CONS -->|"POST /score"| API["FastAPI<br/>+ SHAP reasons"]
+        API <--> REDIS["Redis<br/>online features"]
+        MLF["MLflow registry<br/>@production"] -->|model| API
+    end
+
+    CONS --> PG[("Postgres<br/>scored + alerts")]
+    CONS --> AT["<i>alerts</i> topic"]
+
+    subgraph monitoring["Monitoring (Phase 6)"]
+        PG --> MON["Evidently<br/>drift monitor"]
+        MON --> PROM[Prometheus]
+        API --> PROM
+        PROM --> GRAF[Grafana]
+    end
+
+    subgraph retraining["Self-updating loop (Phase 7)"]
+        PROM -->|"drift alert"| TRIG[auto_retrain_on_drift]
+        TRIG --> RT["retrain.py<br/>train challenger"]
+        PG -->|"recent labelled data"| RT
+        RT --> GATE{"promotion gate<br/>PR-AUC ↑ & cost ↔"}
+        GATE -->|"only if it wins"| MLF
+    end
+
+    subgraph demo["Dashboard (Phase 8)"]
+        PG --> DASH["Streamlit<br/>:8501"]
+        PROM --> DASH
+        MLF --> DASH
+    end
+```
 
 ## Project Progress
 
@@ -624,6 +724,61 @@ fail only if the pipeline itself breaks.
 | `--tracking-uri`      | `$MLFLOW_TRACKING_URI`         | MLflow registry (sqlite for CI, the stack's for live).|
 | `RETRAIN_COOLDOWN_S`  | `21600` (6h)                   | Min gap between drift-triggered retrains.            |
 
+### Phase 8 — Dashboard, docs & demo
+
+Everything above is invisible plumbing until you can *watch* it work. Phase 8
+adds the demo front door: a **Streamlit dashboard** (`src/dashboard/app.py`)
+that makes the whole system legible on one screen.
+
+```bash
+docker compose up dashboard        # part of the default stack too
+# -> http://localhost:8501
+```
+
+**Three tabs:**
+
+1. **📡 Live stream** — KPI row (scored / flagged / alert rate / p50 / p95
+   latency), throughput per minute (scored vs flagged), the fraud-score
+   distribution with the decision threshold drawn on it, and the latest scored
+   transactions with a probability bar per row.
+2. **🚨 Fraud alerts & SHAP** — every alert the consumer published; pick one
+   and see *why*: a signed SHAP bar chart (real contribution magnitudes — the
+   API stores them with each alert), the feature values, amount, merchant and
+   cold-start status.
+3. **📈 Model & drift** — which model version holds `@production` (live from
+   MLflow), Evidently drift status (live from Prometheus), the offline
+   evaluation table, and the last Phase-7 promotion-gate decision with its full
+   paper trail.
+
+**Design decisions worth noting:**
+
+- The dashboard has its **own slim image** (`Dockerfile.dashboard`): it talks to
+  Postgres/Prometheus/MLflow over the network, so it needs none of the ML stack
+  — it builds in seconds and stays small.
+- **Every data source is optional.** Postgres down → a "start the stack" screen
+  with the exact command; Prometheus down → drift tiles explain what to start;
+  MLflow down → the model line simply omits the version. A half-started stack
+  still renders a useful page.
+- **Honest charts.** SHAP bars use the *real* signed contribution (the API now
+  serializes `shap_value` with every reason) — alerts recorded before that
+  change fall back to a ranked list rather than fabricating bar lengths. The
+  score histogram uses a labeled symlog axis because legit transactions
+  outnumber fraud ~200:1. Chart colors are a CVD-validated pair (blue = volume
+  / towards-legit, red = flagged / towards-fraud) and direction is always also
+  written in text.
+
+**Config (environment variables, `dashboard` service):**
+
+| Variable              | Default (compose)                                   | Meaning                          |
+| --------------------- | ---------------------------------------------------- | -------------------------------- |
+| `DATABASE_URL`        | `postgresql://sentinel:sentinel@postgres:5432/sentinelpay` | Stream + alerts source.    |
+| `PROMETHEUS_URL`      | `http://prometheus:9090`                             | Drift gauges.                    |
+| `MLFLOW_TRACKING_URI` | `http://mlflow:5000`                                 | `@production` version lookup.    |
+
+**Demo assets:** `docs/demo.md` is the step-by-step 2-minute walkthrough script
+(what to run, what to show, what to say) for recording a Loom/GIF, and
+`docs/resume_bullets.md` has ready-to-use resume lines for this project.
+
 ### Upcoming Phases
 
 - [x] Phase 4 — Serving API, online features & Docker (MVP)
@@ -647,6 +802,11 @@ fail only if the pipeline itself breaks.
   - [x] Step 4 — Synthetic Sparkov-shaped generator for CI/tests (`synthetic_data.py`)
   - [x] Step 5 — pytest suite + GitHub Actions (`ci.yml` lint+tests, `retrain.yml` synthetic E2E)
   - [x] Step 6 — Drift-triggered retraining (`auto_retrain_on_drift.py` + compose `retrainer` service)
+- [x] Phase 8 — Dashboard, docs & demo
+  - [x] Step 1 — Streamlit dashboard: live stream, alerts + SHAP, model & drift (`src/dashboard/`)
+  - [x] Step 2 — README: architecture diagram, metrics table, one-command quick start
+  - [x] Step 3 — Demo walkthrough script (`docs/demo.md`) + resume bullets (`docs/resume_bullets.md`)
+  - [ ] Step 4 — Record the 2-minute Loom / demo GIF (script ready in `docs/demo.md`)
 
 ## Project Structure
 
@@ -681,8 +841,10 @@ src/
 │   ├── db.py               #   Postgres schema + inserts (raw JSONB for Phase 7 retraining)
 │   ├── producer.py         #   replay Sparkov rows in timestamp order -> transactions
 │   └── consumer.py         #   score via /score, write Postgres, publish -> alerts
-└── monitor/                # Phase 6: monitoring & drift detection
-    └── drift_monitor.py    #   Evidently checks vs training reference -> Prometheus gauges
+├── monitor/                # Phase 6: monitoring & drift detection
+│   └── drift_monitor.py    #   Evidently checks vs training reference -> Prometheus gauges
+└── dashboard/              # Phase 8: Streamlit demo dashboard
+    └── app.py              #   live stream + alerts/SHAP + model & drift (port 8501)
 monitoring/                 # Phase 6: Prometheus + Grafana configuration
 ├── prometheus.yml          #   scrape api:8000 + monitor:8001 every 5s
 ├── alerts.yml              #   drift + operational alert rules
@@ -707,7 +869,10 @@ tests/                       # Phase 7: pytest suite (runs on synthetic data)
 ├── ci.yml                   #   lint + pytest on every push / PR
 └── retrain.yml              #   scheduled + on-demand synthetic retrain E2E
 docs/
-└── mlflow_guide.md         # Phase 3: step-by-step MLflow walkthrough
+├── mlflow_guide.md         # Phase 3: step-by-step MLflow walkthrough
+├── demo.md                 # Phase 8: 2-minute demo walkthrough script (for Loom/GIF)
+├── demo_prep.md            # Phase 8: exact command order to get demo-ready
+└── resume_bullets.md       # Phase 8: ready-to-use resume lines for this project
 reports/                    # Phase 3: generated plots + JSON/CSV reports (git-ignored)
 mlruns/ + mlflow.db         # Phase 3: MLflow artifact store + tracking DB (git-ignored)
 notebooks/

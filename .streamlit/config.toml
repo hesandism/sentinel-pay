@@ -1,0 +1,12 @@
+# SentinelPay dashboard — pinned theme (Phase 8)
+# The charts' palette was validated against a LIGHT surface, so the app commits
+# to light mode rather than following the OS theme.
+[theme]
+base = "light"
+primaryColor = "#2a78d6"
+
+[server]
+headless = true
+
+[browser]
+gatherUsageStats = false
