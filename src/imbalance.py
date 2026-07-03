@@ -20,7 +20,7 @@ for extreme imbalance. We also report precision, recall, ROC-AUC, and
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 import numpy as np

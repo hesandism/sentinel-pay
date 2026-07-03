@@ -44,7 +44,7 @@ There is **no account-creation column** in this dataset, so the optional
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 import numpy as np
 import pandas as pd

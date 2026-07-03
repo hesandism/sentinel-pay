@@ -32,7 +32,7 @@ sqlalchemy==2.0.30
 kafka-python==2.0.2
 
 # ── Monitoring & drift detection (Phase 6) ──────────────────
-evidently==0.4.30
+evidently==0.4.40             # keep in lockstep with requirements-api.txt
 prometheus-client==0.20.0
 
 # ── Dashboard (Phase 8) ─────────────────────────────────────

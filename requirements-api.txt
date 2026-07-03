@@ -32,3 +32,8 @@ requests==2.32.2              # consumer calls the /score API over HTTP
 # API itself exposes /metrics for Prometheus to scrape.
 evidently==0.4.40             # data-drift / target-drift reports vs training reference
 prometheus-client==0.20.0     # export drift + latency/throughput metrics
+
+# ── Automated retraining (Phase 7) ──────────────────────────
+# The retrainer service reuses src/train.py inside this same image.
+matplotlib==3.9.0             # evaluation plots (train.py -> evaluate.py)
+optuna==3.6.1                 # optional --tune for challenger training

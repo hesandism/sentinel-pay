@@ -247,6 +247,33 @@ services:
     depends_on:
       - prometheus
 
+  # ─────────────────────────────────────────────────────────────────────────
+  # Phase 7 — automated retraining (opt-in: `--profile retrain`)
+  # ─────────────────────────────────────────────────────────────────────────
+  # ONE-SHOT: pulls recent labelled transactions from Postgres, retrains a
+  # challenger with the Phase-2/3 pipeline, evaluates champion vs challenger on
+  # a shared held-out window, and promotes in MLflow ONLY if the gate passes.
+  # Run on a schedule (cron / Task Scheduler) or on drift via
+  # scripts/auto_retrain_on_drift.py:
+  #
+  #     docker compose --profile retrain run --rm retrainer
+  retrainer:
+    build: .
+    profiles: ["retrain"]      # excluded from a plain `docker compose up`
+    command: ["python", "-m", "src.retrain"]
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      DATABASE_URL: postgresql://sentinel:sentinel@postgres:5432/sentinelpay
+    volumes:
+      - ./data:/app/data:ro                      # base training CSV (git-ignored)
+      - ./reports/retrain:/app/reports/retrain   # promotion_report.json on the host
+    depends_on:
+      mlflow:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
 volumes:
   redis-data:
   mlflow-data:

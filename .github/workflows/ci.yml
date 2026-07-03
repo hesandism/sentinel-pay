@@ -1,0 +1,43 @@
+# SentinelPay — CI (Phase 7)
+# ==========================
+# Runs on every push and pull request: lint first (fast fail), then the pytest
+# suite. All tests run on SYNTHETIC data (src/synthetic_data.py) — the real
+# Kaggle dataset is git-ignored and never reaches CI.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # Pin ruff to the version pinned in requirements.txt so local and CI
+      # lint results can never disagree.
+      - run: pip install ruff==0.4.5
+      - run: ruff check src scripts tests
+
+  test:
+    runs-on: ubuntu-latest
+    needs: lint            # do not burn test minutes on unlintable code
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-api.txt
+      # The serving pins are a strict subset kept in lockstep with the full
+      # file; installing both surfaces any accidental version split immediately.
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-api.txt
+      - name: Run tests
+        run: pytest -q --tb=short

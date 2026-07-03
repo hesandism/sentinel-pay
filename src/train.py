@@ -50,7 +50,6 @@ import time
 from datetime import datetime
 from typing import Optional, Tuple
 
-import numpy as np
 import pandas as pd
 
 # Make the sibling Phase 2 modules importable whether run as

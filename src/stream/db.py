@@ -56,10 +56,14 @@ CREATE TABLE IF NOT EXISTS scored_transactions (
     cold_start        BOOLEAN,                   -- first time this card was seen?
     is_fraud_label    INTEGER,                   -- ground truth from Sparkov (for monitoring)
     latency_ms        DOUBLE PRECISION,          -- server-side scoring time
+    raw               JSONB,                     -- full raw transaction (Phase 7: retraining data)
     scored_at         TIMESTAMPTZ DEFAULT now()  -- when the pipeline scored it
 );
 CREATE INDEX IF NOT EXISTS idx_scored_decision ON scored_transactions (decision);
 CREATE INDEX IF NOT EXISTS idx_scored_cc_num   ON scored_transactions (cc_num);
+-- Phase 7 migration: databases created before the ``raw`` column existed get it
+-- added in place (IF NOT EXISTS keeps this a no-op everywhere else).
+ALTER TABLE scored_transactions ADD COLUMN IF NOT EXISTS raw JSONB;
 
 CREATE TABLE IF NOT EXISTS alerts (
     id                BIGSERIAL PRIMARY KEY,
@@ -115,9 +119,9 @@ def insert_scored_transaction(conn, txn: dict, label, result: dict) -> None:
             INSERT INTO scored_transactions (
                 trans_num, cc_num, trans_time, amt, merchant, category,
                 fraud_probability, decision, threshold, cold_start,
-                is_fraud_label, latency_ms
+                is_fraud_label, latency_ms, raw
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (trans_num) DO NOTHING
             """,
             (
@@ -133,6 +137,9 @@ def insert_scored_transaction(conn, txn: dict, label, result: dict) -> None:
                 result.get("cold_start"),
                 label,
                 result.get("latency_ms"),
+                # The complete raw transaction, so Phase 7 retraining can pull
+                # recent LABELLED data with every feature-pipeline input intact.
+                Json(txn),
             ),
         )
 
