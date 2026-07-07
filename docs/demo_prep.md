@@ -29,13 +29,13 @@ docker compose --profile retrain run --rm retrainer
 
 **6. Sanity-check every URL you'll show:**
 
-| URL | What to confirm |
-|---|---|
-| http://localhost:8501 | KPIs > 0; all three tabs work; a recent alert shows SHAP bars |
-| http://localhost:8501 → Model & drift | Drift tiles ✅; gate panel shows the retrain decision |
-| http://localhost:5000 | MLflow: `SentinelPayFraudModel` with `@production` alias |
-| http://localhost:3000 | Grafana dashboard has data |
-| http://localhost:8000/docs | API docs load |
+| URL                                   | What to confirm                                               |
+| ------------------------------------- | ------------------------------------------------------------- |
+| http://localhost:8501                 | KPIs > 0; all three tabs work; a recent alert shows SHAP bars |
+| http://localhost:8501 → Model & drift | Drift tiles ✅; gate panel shows the retrain decision         |
+| http://localhost:5000                 | MLflow:`SentinelPayFraudModel` with `@production` alias       |
+| http://localhost:3000                 | Grafana dashboard has data                                    |
+| http://localhost:8000/docs            | API docs load                                                 |
 
 > The drift monitor needs ~1 minute and 100+ scored rows before its tiles
 > populate; "Last drift check" should read under 30s once it's going.
@@ -72,5 +72,6 @@ docker compose stop      # keeps all data; `docker compose start` resumes instan
   ```
 
   (bash: `STREAM_LIMIT=5000 docker compose up producer -d`)
+
 - No Kaggle data on the machine? Synthesize a feed first — see "Option B" in
   the README quick start.
