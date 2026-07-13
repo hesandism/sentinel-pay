@@ -168,11 +168,16 @@ services:
     environment:
       KAFKA_BOOTSTRAP_SERVERS: redpanda:29092
       TRANSACTIONS_TOPIC: transactions
-      # Replay knobs (see src/stream/config.py). Override at `docker compose up`
-      # or in a .env file — e.g. point STREAM_CSV at a synthetic feed
-      # (src/synthetic_data.py) when the Kaggle dataset is not downloaded.
+      # By default the producer GENERATES a fraud-rich synthetic feed
+      # (src/synthetic_data.py) so the dashboard shows real fraud alerts without
+      # the git-ignored Kaggle dataset. Set STREAM_SOURCE=csv (+ STREAM_CSV) to
+      # replay a real CSV instead. See src/stream/config.py for every knob.
+      STREAM_SOURCE: ${STREAM_SOURCE:-synthetic}
+      STREAM_SYNTH_ROWS: ${STREAM_SYNTH_ROWS:-5000}
+      STREAM_SYNTH_CARDS: "150"
+      STREAM_SYNTH_FRAUD_RATE: ${STREAM_SYNTH_FRAUD_RATE:-0.30}
       STREAM_CSV: ${STREAM_CSV:-data/processed/test_time_split.csv}
-      STREAM_LIMIT: "1000"       # 0 = replay the whole file
+      STREAM_LIMIT: "0"          # 0 = send the whole generated/loaded feed
       STREAM_SPEEDUP: "120"
       STREAM_MAX_DELAY: "1.0"
     volumes:
