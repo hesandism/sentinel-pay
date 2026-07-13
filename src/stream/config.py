@@ -67,10 +67,31 @@ DATABASE_URL = os.getenv(
 )
 
 # --------------------------------------------------------------------------- #
+# Producer data source — synthetic (default) vs the raw Sparkov CSV.
+# --------------------------------------------------------------------------- #
+# "synthetic" generates a fraud-rich Sparkov-shaped feed on the fly
+# (src/synthetic_data.py), so the dashboard shows real fraud alerts without the
+# git-ignored Kaggle dataset. "csv" replays STREAM_CSV instead.
+STREAM_SOURCE = os.getenv("STREAM_SOURCE", "synthetic").lower()
+
+# Synthetic-feed knobs (used only when STREAM_SOURCE == "synthetic").
+STREAM_SYNTH_ROWS = int(os.getenv("STREAM_SYNTH_ROWS", "5000"))
+STREAM_SYNTH_CARDS = int(os.getenv("STREAM_SYNTH_CARDS", "150"))
+# A deliberately HIGH fraud rate so flagged fraud is clearly visible. The real
+# training data is ~0.5% fraud; this is a demo feed, not a statistical clone.
+STREAM_SYNTH_FRAUD_RATE = float(os.getenv("STREAM_SYNTH_FRAUD_RATE", "0.30"))
+STREAM_SYNTH_START = os.getenv("STREAM_SYNTH_START", "2024-01-01")
+STREAM_SYNTH_DAYS = int(os.getenv("STREAM_SYNTH_DAYS", "7"))
+# RNG seed. -1 = pick a fresh random seed each run, so repeated producer runs
+# generate NEW transactions (fresh trans_num + varied data) rather than
+# duplicates the Postgres sink drops on ON CONFLICT (trans_num).
+STREAM_SYNTH_SEED = int(os.getenv("STREAM_SYNTH_SEED", "-1"))
+
+# --------------------------------------------------------------------------- #
 # Producer replay behaviour (all overridable on the command line too).
 # --------------------------------------------------------------------------- #
-# Which CSV to replay. Defaults to the chronological Phase-1 test split (already
-# time-sorted, and data the model has never trained on).
+# Which CSV to replay when STREAM_SOURCE == "csv". Defaults to the chronological
+# Phase-1 test split (already time-sorted, data the model never trained on).
 STREAM_CSV = os.getenv("STREAM_CSV", "data/processed/test_time_split.csv")
 
 # How many rows to replay. 0 means "the whole file". A small default keeps the

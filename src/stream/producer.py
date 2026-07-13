@@ -2,9 +2,17 @@
 SentinelPay — transaction feed producer (Phase 5)
 =================================================
 
-Replays Sparkov rows into the Kafka ``transactions`` topic **in timestamp
-order**, to simulate a live payment feed. This is the "in" side of the stream:
-the consumer reads what this writes.
+Feeds the Kafka ``transactions`` topic **in timestamp order**, to simulate a
+live payment feed. This is the "in" side of the stream: the consumer reads what
+this writes.
+
+Where the transactions come from
+--------------------------------
+By default the producer **generates a fraud-rich synthetic feed** on the fly
+(``src/synthetic_data.py``) so a demo shows plenty of flagged fraud without the
+git-ignored Kaggle dataset — the fraud rate is tunable (``--synth-fraud-rate`` /
+``STREAM_SYNTH_FRAUD_RATE``, default 0.30). Set ``--source csv`` (or
+``STREAM_SOURCE=csv``) to replay a real CSV (``STREAM_CSV``) instead.
 
 What one message looks like
 ---------------------------
@@ -44,6 +52,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import time
 
 import pandas as pd
@@ -113,13 +122,45 @@ def _connect_producer(retries: int = 30, delay_s: float = 2.0) -> KafkaProducer:
     )
 
 
-def replay(csv_path: str, limit: int, speedup: float, max_delay: float, pace: bool) -> None:
-    """Read the CSV, sort by time, and stream each row to the transactions topic."""
-    print(f"[producer] Loading {csv_path} ...")
-    df = pd.read_csv(csv_path)
+def build_dataframe(args) -> pd.DataFrame:
+    """Produce the transactions frame to feed: synthetic (default) or a CSV.
 
-    # Replay strictly in timestamp order (the split is already sorted, but we
-    # sort defensively so any CSV works). unix_time is the numeric clock.
+    Synthetic mode generates a fraud-rich Sparkov-shaped feed on the fly via
+    ``src/synthetic_data.py`` — every raw column the /score API expects, with a
+    tunable (deliberately high) fraud rate — so the demo shows plenty of flagged
+    fraud without the git-ignored Kaggle dataset.
+    """
+    if args.source == "synthetic":
+        # Imported lazily so a plain CSV replay never pulls in the generator.
+        from ..synthetic_data import make_sparkov_frame
+
+        # seed < 0 -> a fresh random seed each run, so repeated producer runs
+        # emit NEW transactions (new trans_num + varied data) instead of
+        # duplicates the Postgres sink drops on ON CONFLICT (trans_num).
+        seed = args.synth_seed if args.synth_seed >= 0 else random.randint(0, 1_000_000)
+        print(f"[producer] Generating synthetic feed "
+              f"(rows={args.synth_rows}, cards={args.synth_cards}, "
+              f"fraud_rate={args.synth_fraud_rate}, seed={seed}) ...")
+        df = make_sparkov_frame(
+            n_rows=args.synth_rows,
+            n_cards=args.synth_cards,
+            fraud_rate=args.synth_fraud_rate,
+            start=args.synth_start,
+            days=args.synth_days,
+            seed=seed,
+        )
+        print(f"[producer] Synthetic feed built: {len(df)} rows, "
+              f"actual fraud rate {df['is_fraud'].mean():.2%}")
+        return df
+
+    print(f"[producer] Loading {args.csv} ...")
+    return pd.read_csv(args.csv)
+
+
+def replay(df: pd.DataFrame, limit: int, speedup: float, max_delay: float, pace: bool) -> None:
+    """Sort the frame by time and stream each row to the transactions topic."""
+    # Replay strictly in timestamp order (a split is already sorted, but we sort
+    # defensively so any frame works). unix_time is the numeric clock.
     df = df.sort_values("unix_time", kind="mergesort").reset_index(drop=True)
     if limit and limit > 0:
         df = df.head(limit)
@@ -158,10 +199,30 @@ def replay(csv_path: str, limit: int, speedup: float, max_delay: float, pace: bo
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Replay Sparkov rows into Kafka.")
-    parser.add_argument("--csv", default=config.STREAM_CSV, help="CSV to replay.")
+    parser = argparse.ArgumentParser(
+        description="Feed synthetic (default) or CSV transactions into Kafka."
+    )
+    parser.add_argument("--source", choices=["synthetic", "csv"],
+                        default=config.STREAM_SOURCE,
+                        help="Generate a synthetic feed (default) or replay a CSV.")
+    parser.add_argument("--csv", default=config.STREAM_CSV,
+                        help="CSV to replay when --source csv.")
+    # Synthetic-feed knobs (only used when --source synthetic).
+    parser.add_argument("--synth-rows", type=int, default=config.STREAM_SYNTH_ROWS,
+                        help="How many synthetic transactions to generate.")
+    parser.add_argument("--synth-cards", type=int, default=config.STREAM_SYNTH_CARDS,
+                        help="Number of distinct cards in the synthetic feed.")
+    parser.add_argument("--synth-fraud-rate", type=float,
+                        default=config.STREAM_SYNTH_FRAUD_RATE,
+                        help="Fraud fraction of the synthetic feed (0..1).")
+    parser.add_argument("--synth-start", default=config.STREAM_SYNTH_START,
+                        help="First day of the synthetic window (ISO date).")
+    parser.add_argument("--synth-days", type=int, default=config.STREAM_SYNTH_DAYS,
+                        help="Span of the synthetic window in days.")
+    parser.add_argument("--synth-seed", type=int, default=config.STREAM_SYNTH_SEED,
+                        help="RNG seed; < 0 picks a fresh random seed each run.")
     parser.add_argument("--limit", type=int, default=config.STREAM_LIMIT,
-                        help="Number of rows to send (0 = all).")
+                        help="Cap rows sent after building the feed (0 = all).")
     parser.add_argument("--speedup", type=float, default=config.STREAM_SPEEDUP,
                         help="Divide real inter-arrival gaps by this factor.")
     parser.add_argument("--max-delay", type=float, default=config.STREAM_MAX_DELAY,
@@ -170,8 +231,9 @@ def main() -> int:
                         help="Send as fast as possible (ignore timestamps).")
     args = parser.parse_args()
 
+    df = build_dataframe(args)
     replay(
-        csv_path=args.csv,
+        df,
         limit=args.limit,
         speedup=args.speedup,
         max_delay=args.max_delay,
