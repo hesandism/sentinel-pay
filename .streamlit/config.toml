@@ -3,7 +3,7 @@
 # to light mode rather than following the OS theme.
 [theme]
 base = "light"
-primaryColor = "#2a78d6"
+primaryColor = "#033b80"
 
 [server]
 headless = true

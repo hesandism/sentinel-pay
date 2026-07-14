@@ -73,8 +73,8 @@ GRID = "#e1e0d9"
 MUTED = "#898781"
 
 st.set_page_config(
-    page_title="SentinelPay — fraud detection",
-    page_icon="🛡️",
+    page_title="SentinelPay",
+    page_icon="images/logo2.png",
     layout="wide",
 )
 
@@ -159,7 +159,14 @@ WINDOWS = {
 }
 
 with st.sidebar:
-    st.header("🛡️ SentinelPay")
+    left, center = st.columns([1, 2])
+    with left:
+        st.image("images/logo1.png", width = 75)
+    with center:
+        st.markdown(
+    "<h2 style='font-size:27px;'><b>SentinelPay</b></h2>",
+    unsafe_allow_html=True)
+    
     window_label = st.selectbox("Time window", list(WINDOWS), index=2)
     window_min = WINDOWS[window_label]
     # Default on for the live demo; DASHBOARD_AUTO_REFRESH=0 turns it off (e.g.
@@ -188,7 +195,7 @@ else:
 # --------------------------------------------------------------------------- #
 # Gate: without Postgres there is nothing to show — explain how to start it.
 # --------------------------------------------------------------------------- #
-st.title("SentinelPay — real-time fraud detection")
+st.title("SentinelPay :   Real-time fraud detection")
 
 if not postgres_reachable():
     st.error(
@@ -242,7 +249,7 @@ if scored == 0:
     )
 
 tab_stream, tab_alerts, tab_model = st.tabs(
-    ["📡 Live stream", "🚨 Fraud alerts & SHAP", "📈 Model & drift"]
+    ["Live stream", "Fraud alerts & SHAP", "Model & drift"]
 )
 
 
