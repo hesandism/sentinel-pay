@@ -46,6 +46,11 @@ import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
+from dotenv import load_dotenv
+
+# Loads .env for manual `streamlit run` on the host; no-op inside compose,
+# where env vars are already injected by the container.
+load_dotenv()
 
 # --------------------------------------------------------------------------- #
 # Configuration — env-driven so the same file runs on the host (published
