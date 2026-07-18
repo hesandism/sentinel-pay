@@ -191,11 +191,14 @@ with st.sidebar:
     "<h2 style='font-size:27px;'><b>SentinelPay</b></h2>",
     unsafe_allow_html=True)
     
-    window_label = st.selectbox("Time window", list(WINDOWS), index=2)
+    # A one-hour window reads as a clean, moving line; 24h of minutes crams into
+    # an unreadable band. The demo defaults to the hour view; live ops keeps 24h.
+    window_label = st.selectbox("Time window", list(WINDOWS), index=1 if DEMO_MODE else 2)
     window_min = WINDOWS[window_label]
-    # Default on for the live demo; DASHBOARD_AUTO_REFRESH=0 turns it off (e.g.
-    # for programmatic runs via streamlit.testing, where the sleep+rerun loop
-    # would never terminate).
+    # On by default: the demo stream is time-anchored, so each rerun advances it
+    # (new rows arrive, the line scrolls). DASHBOARD_AUTO_REFRESH=0 turns it off
+    # (e.g. for programmatic runs via streamlit.testing, where the sleep+rerun
+    # loop would never terminate).
     auto_refresh = st.toggle(
         "Auto-refresh", value=os.getenv("DASHBOARD_AUTO_REFRESH", "1") == "1"
     )

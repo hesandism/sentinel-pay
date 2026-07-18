@@ -12,6 +12,6 @@
 # on 3.11–3.14 alike, so nothing is ever built from source.
 streamlit==1.59.2
 altair>=5.4
-pandas>=2.3.0
-numpy>=2.1.0
+pandas>=2.3.2
+numpy>=2.3.0
 requests>=2.32.0
