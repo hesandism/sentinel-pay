@@ -57,11 +57,16 @@ if DEMO_MODE:
     # regardless of the working directory the host launched us from.
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import demo_data
-from dotenv import load_dotenv
-
 # Loads .env for manual `streamlit run` on the host; no-op inside compose,
-# where env vars are already injected by the container.
-load_dotenv()
+# where env vars are already injected by the container. python-dotenv isn't in
+# the slim deploy image (the public demo reads env from the host's secrets), so
+# treat it as optional rather than a hard dependency.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ModuleNotFoundError:
+    pass
 
 # --------------------------------------------------------------------------- #
 # Configuration — env-driven so the same file runs on the host (published
