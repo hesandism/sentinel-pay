@@ -4,8 +4,14 @@
 # repo-root one, so this slim set is what the PUBLIC DEMO builds from. It skips
 # the whole ML/Postgres stack — the demo (DEMO_MODE=1) fabricates its data in
 # demo_data.py and never opens a database or network connection.
-streamlit==1.35.0
-altair==5.5.0
-pandas==2.2.2
-numpy==1.26.4
-requests==2.32.2
+#
+# NOTE: versions here MUST have prebuilt wheels for the Python the host picks.
+# Community Cloud defaults to a very new Python (3.14), which has no wheels for
+# old numpy/pandas/Pillow — those then try to COMPILE from C source and fail
+# (the "could not find zlib for Pillow" error). These floors resolve to wheels
+# on 3.11–3.14 alike, so nothing is ever built from source.
+streamlit==1.59.2
+altair>=5.4
+pandas>=2.3.0
+numpy>=2.1.0
+requests>=2.32.0
