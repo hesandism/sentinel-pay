@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 import warnings
 from datetime import datetime, timezone
@@ -46,6 +47,16 @@ import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
+
+# DEMO_MODE=1 serves a self-contained synthetic snapshot instead of Postgres/
+# Prometheus/MLflow — this is what the public, backend-less deploy runs on (see
+# DEPLOY.md). Everything below degrades through demo_data when it's set.
+DEMO_MODE = os.getenv("DEMO_MODE", "0") == "1"
+if DEMO_MODE:
+    # Streamlit runs this file as a script, so make its own directory importable
+    # regardless of the working directory the host launched us from.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import demo_data
 from dotenv import load_dotenv
 
 # Loads .env for manual `streamlit run` on the host; no-op inside compose,
@@ -92,6 +103,8 @@ def _connect():
 @st.cache_data(ttl=5, show_spinner=False)
 def read_sql(sql: str, params: tuple = ()) -> pd.DataFrame:
     """Run one query on a fresh short-lived connection (cached for 5s)."""
+    if DEMO_MODE:
+        return demo_data.read_sql(sql, params)
     with warnings.catch_warnings():
         # pandas warns that it prefers SQLAlchemy; plain psycopg2 is fine here.
         warnings.filterwarnings("ignore", message="pandas only supports SQLAlchemy")
@@ -105,6 +118,8 @@ def read_sql(sql: str, params: tuple = ()) -> pd.DataFrame:
 
 
 def postgres_reachable() -> bool:
+    if DEMO_MODE:
+        return True
     try:
         read_sql("SELECT 1 AS ok")
         return True
@@ -115,6 +130,8 @@ def postgres_reachable() -> bool:
 @st.cache_data(ttl=10, show_spinner=False)
 def prom_value(query: str):
     """One instant-query scalar from Prometheus, or None if unreachable."""
+    if DEMO_MODE:
+        return demo_data.prom_value(query)
     try:
         r = requests.get(
             f"{PROMETHEUS_URL}/api/v1/query", params={"query": query}, timeout=2
@@ -128,6 +145,8 @@ def prom_value(query: str):
 @st.cache_data(ttl=30, show_spinner=False)
 def production_model():
     """(version, source_run_id) of the @production alias via MLflow REST."""
+    if DEMO_MODE:
+        return demo_data.production_model()
     try:
         r = requests.get(
             f"{MLFLOW_URL}/api/2.0/mlflow/registered-models/alias",
@@ -177,13 +196,23 @@ with st.sidebar:
     )
     refresh_s = st.slider("Refresh every (s)", 2, 30, 5, disabled=not auto_refresh)
     st.divider()
-    st.caption(
-        "Stack consoles\n\n"
-        f"- [MLflow]({MLFLOW_URL}) — registry & runs\n"
-        "- [Grafana](http://localhost:3000) — ops dashboard\n"
-        f"- [Prometheus]({PROMETHEUS_URL}/alerts) — alert rules\n"
-        "- [API docs](http://localhost:8000/docs) — /score endpoint"
-    )
+    if DEMO_MODE:
+        # The stack consoles are localhost-only; on the public deploy point
+        # people at the source instead.
+        st.caption(
+            "Live demo — synthetic data, no backend.\n\n"
+            "- [Source on GitHub](https://github.com/HesandiSM/sentinel-pay) — full stack\n"
+            "- Run it locally with `docker compose up` for the real Kafka → "
+            "API → Postgres pipeline."
+        )
+    else:
+        st.caption(
+            "Stack consoles\n\n"
+            f"- [MLflow]({MLFLOW_URL}) — registry & runs\n"
+            "- [Grafana](http://localhost:3000) — ops dashboard\n"
+            f"- [Prometheus]({PROMETHEUS_URL}/alerts) — alert rules\n"
+            "- [API docs](http://localhost:8000/docs) — /score endpoint"
+        )
 
 # WHERE clause for the chosen window (safe: value comes from our own dict).
 if window_min is None:
@@ -196,6 +225,14 @@ else:
 # Gate: without Postgres there is nothing to show — explain how to start it.
 # --------------------------------------------------------------------------- #
 st.title("SentinelPay :   Real-time fraud detection")
+
+if DEMO_MODE:
+    st.info(
+        "🎛️ **Live demo** — running on a deterministic synthetic snapshot "
+        "(~24h of scored transactions), so it renders with no backend. The full "
+        "system streams real Sparkov transactions through Kafka → the scoring "
+        "API → Postgres. [Source on GitHub](https://github.com/HesandiSM/sentinel-pay)."
+    )
 
 if not postgres_reachable():
     st.error(

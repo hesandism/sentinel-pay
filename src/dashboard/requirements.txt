@@ -1,0 +1,11 @@
+# SentinelPay dashboard — deploy pins (Streamlit Community Cloud / HF Spaces)
+# ===========================================================================
+# Community Cloud prefers the requirements.txt next to the entrypoint over the
+# repo-root one, so this slim set is what the PUBLIC DEMO builds from. It skips
+# the whole ML/Postgres stack — the demo (DEMO_MODE=1) fabricates its data in
+# demo_data.py and never opens a database or network connection.
+streamlit==1.35.0
+altair==5.5.0
+pandas==2.2.2
+numpy==1.26.4
+requests==2.32.2
