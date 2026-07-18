@@ -1,6 +1,6 @@
-# SentinelPay 🛡️
+# SentinelPay
 
-**Real-time card-fraud detection with the full MLOps loop — not just a notebook.**
+**Real-time card-fraud detection with the full MLOps loop - not just a notebook.**
 
 [![Live Demo](https://img.shields.io/badge/%E2%96%B6%20Live%20Demo-Streamlit%20Cloud-FF4B4B?style=for-the-badge&logo=streamlit&logoColor=white)](https://sentinel-pay-hzg2nnqckg8ekc4ymvpz7g.streamlit.app/)
 &nbsp;
@@ -34,8 +34,8 @@ model only if it provably wins** — automatically.
 
 ### **[▶ Open the live dashboard →](https://sentinel-pay-hzg2nnqckg8ekc4ymvpz7g.streamlit.app/)**
 
-No install, no login. The public dashboard runs in **demo mode** — a
-self-contained, time-anchored synthetic stream with *no backend*, so the
+The public dashboard runs in **demo mode** - a
+self-contained, time-anchored synthetic stream, so the
 transaction feed, fraud alerts with per-alert SHAP explanations, and the
 model/drift panels all render and update live. The offline evaluation metrics on
 the "Model & drift" tab are the **real** numbers from training.
@@ -57,24 +57,105 @@ the "Model & drift" tab are the **real** numbers from training.
 | **Dashboard** | Streamlit · Altair |
 | **Infra / CI** | Docker Compose · GitHub Actions |
 
-## Headline results
+## Project Structure
 
-Evaluated on a strictly chronological hold-out (370k transactions, final 4
-months — the model never sees the future):
+```
+data/
+├── fraudTrain.csv          # Raw Kaggle dataset (train)
+├── fraudTest.csv           # Raw Kaggle dataset (test)
+└── processed/
+    ├── train_time_split.csv  # Chronological 80% train split
+    └── test_time_split.csv   # Chronological 20% test split
+src/
+├── features.py             # Leakage-safe feature engineering (FeatureEngineer)
+├── data.py                 # Load splits + chronological validation split
+├── imbalance.py            # Class-weight vs SMOTE comparison + metrics
+├── tuning.py               # Optuna hyperparameter search (validation PR-AUC)
+├── calibration.py          # Isotonic / Platt probability calibration
+├── threshold.py            # Cost-matrix decision-threshold selection
+├── explain.py              # SHAP TreeExplainer (global + per-transaction)
+├── artifacts.py            # Persist feature/imbalance decisions + trained model
+├── metrics.py              # Phase 3: consolidated eval metrics (PR-AUC, recall@p, cost)
+├── evaluate.py             # Phase 3: plot + report generation (SHAP, importance, cost, JSON)
+├── train.py                # Phase 3: reproducible training entry point + MLflow logging
+├── promotion.py            # Phase 7: pure, unit-tested champion-vs-challenger gate
+├── synthetic_data.py       # Phase 7: Sparkov-shaped generator for CI/tests
+├── retrain.py              # Phase 7: pull recent data -> train challenger -> gate -> promote
+├── serve/
+│   ├── api.py              # Phase 4: FastAPI /health + /score (loads Production model)
+│   ├── redis_store.py      # Phase 4: Redis online features (recent card history)
+│   └── register_model.py   # Phase 4: one-shot MLflow registrar (Docker bootstrap)
+├── stream/                 # Phase 5: streaming pipeline
+│   ├── config.py           #   shared env config (broker, topics, DB, API URL)
+│   ├── db.py               #   Postgres schema + inserts (raw JSONB for Phase 7 retraining)
+│   ├── producer.py         #   replay Sparkov rows in timestamp order -> transactions
+│   └── consumer.py         #   score via /score, write Postgres, publish -> alerts
+├── monitor/                # Phase 6: monitoring & drift detection
+│   └── drift_monitor.py    #   Evidently checks vs training reference -> Prometheus gauges
+└── dashboard/              # Phase 8: Streamlit demo dashboard
+    └── app.py              #   live stream + alerts/SHAP + model & drift (port 8501)
+monitoring/                 # Phase 6: Prometheus + Grafana configuration
+├── prometheus.yml          #   scrape api:8000 + monitor:8001 every 5s
+├── alerts.yml              #   drift + operational alert rules
+└── grafana/                #   auto-provisioned datasource + live dashboard
+scripts/
+├── test_online_features.py  # Phase 4: manual test (cold_start true -> false)
+├── benchmark_latency.py     # Phase 4: /score latency benchmark (p50/p95/p99)
+├── verify_stream.py         # Phase 5: end-to-end check of the Postgres sink
+├── watch_alerts.py          # Phase 5: live tail of the alerts topic
+├── simulate_drift.py        # Phase 6: manufacture a drifted feed (amt/category/hour/labels)
+└── auto_retrain_on_drift.py # Phase 7: watch Prometheus drift alerts -> trigger the retrainer
+tests/                       # Phase 7: pytest suite (runs on synthetic data)
+├── conftest.py              #   shared fixtures (synthetic frame, tmp registry)
+├── test_promotion.py        #   promotion gate rule (pure, no MLflow)
+├── test_features.py         #   feature engineering shape + leakage-safety
+├── test_metrics.py          #   PR-AUC / recall@p / cost metric helpers
+├── test_threshold.py        #   cost-matrix threshold selection
+├── test_drift_monitor.py    #   drift monitor gauges
+├── test_simulate_drift.py   #   drift simulator output
+└── test_train_smoke.py      #   end-to-end training smoke test
+.github/workflows/           # Phase 7: CI
+├── ci.yml                   #   lint + pytest on every push / PR
+└── retrain.yml              #   scheduled + on-demand synthetic retrain E2E
+docs/
+├── mlflow_guide.md         # Phase 3: step-by-step MLflow walkthrough
+├── demo.md                 # Phase 8: 2-minute demo walkthrough script (for Loom/GIF)
+├── demo_prep.md            # Phase 8: exact command order to get demo-ready
+└── resume_bullets.md       # Phase 8: ready-to-use resume lines for this project
+reports/                    # Phase 3: generated plots + JSON/CSV reports (git-ignored)
+mlruns/ + mlflow.db         # Phase 3: MLflow artifact store + tracking DB (git-ignored)
+notebooks/
+├── load_and_check.ipynb              # Initial sanity checks
+├── 01_eda_time_split.ipynb           # EDA & time-based split
+├── 02_baseline_lightgbm.ipynb        # Baseline LightGBM (6 raw features)
+├── 03_feature_eng_imbalance.ipynb    # Phase 2: features + imbalance comparison
+└── 04_tuning_calibration_shap.ipynb  # Phase 2 (cont.): tuning, calibration, threshold, SHAP
+artifacts/
+└── phase2/                 # Feature engineer + manifests, comparison table,
+                            #   tuned/calibrated model + model manifest
+```
 
-| Metric | Value | Why it matters |
-|---|---|---|
-| **PR-AUC** | **0.871** | The headline metric at a 0.52% fraud rate (accuracy is useless here) |
-| Precision @ chosen threshold | 0.993 | 8 false alarms across 370k transactions |
-| Recall @ chosen threshold | 0.873 | Catches 7 of every 8 fraudulent transactions |
-| Recall @ 80% precision | 0.874 | Quality holds across the operating range |
-| Cost per transaction | $0.124 | Threshold chosen by an amount-aware cost matrix, not by F1 |
-| Scoring latency (p95) | ≈ 32 ms | Full pipeline: Redis features → model → SHAP reasons |
+## Set Up
+
+1. Manually download the train and test datasets from "https://www.kaggle.com/datasets/kartik2112/fraud-detection" and place them in the `data` folder. The datasets are too large to be included in this repository.
+
+```
+data
+|__ fraudTest.csv
+|__ fraudTrain.csv
+```
+2. Create a virtual environment and install the dependencies:
+
+```
+python -m venv .venv
+.venv/bin/activate 
+pip install -r requirements.txt 
+```
 
 ## The 60-second tour
 
 ```bash
-git clone <this-repo> && cd sentinel-pay
+git clone https://github.com/hesandism/sentinel-pay  && cd sentinel-pay
 docker compose up --build          # the whole stack, one command
 ```
 
@@ -105,6 +186,20 @@ STREAM_CSV=data/processed/synthetic_feed.csv docker compose up producer
 | http://localhost:5000 | MLflow — experiment runs + model registry (`@production` alias) |
 | http://localhost:3000 | Grafana — ops dashboard (latency, throughput, drift gauges) |
 | http://localhost:9090/alerts | Prometheus — drift & operational alert rules |
+
+## Headline results
+
+Evaluated on a strictly chronological hold-out (370k transactions, final 4
+months — the model never sees the future):
+
+| Metric | Value | Why it matters |
+|---|---|---|
+| **PR-AUC** | **0.871** | The headline metric at a 0.52% fraud rate (accuracy is useless here) |
+| Precision @ chosen threshold | 0.993 | 8 false alarms across 370k transactions |
+| Recall @ chosen threshold | 0.873 | Catches 7 of every 8 fraudulent transactions |
+| Recall @ 80% precision | 0.874 | Quality holds across the operating range |
+| Cost per transaction | $0.124 | Threshold chosen by an amount-aware cost matrix, not by F1 |
+| Scoring latency (p95) | ≈ 32 ms | Full pipeline: Redis features → model → SHAP reasons |
 
 ## Architecture
 
@@ -148,10 +243,7 @@ flowchart LR
 
 ## Project Progress
 
-### Phase 1 — EDA & Data Preparation
-
-- [x] Exploratory data analysis (`notebooks/01_eda_time_split.ipynb`)
-- [x] Leakage-safe 80/20 chronological train/test split
+### EDA & Data Preparation
 
 **Key findings:**
 
@@ -163,11 +255,7 @@ flowchart LR
 | Train rows | 1,481,915 (Jan 2019 – Aug 2020) |
 | Test rows | 370,479 (Aug 2020 – Dec 2020) |
 
-### Phase 2 — Feature Engineering & Imbalance Handling
-
-- [x] Reusable, leakage-safe feature engineering module (`src/features.py`)
-- [x] Class-imbalance comparison: class weights vs SMOTE/SMOTETomek (`src/imbalance.py`)
-- [x] Phase-2 notebook (`notebooks/03_feature_eng_imbalance.ipynb`)
+### Feature Engineering & Imbalance Handling
 
 **Engineered features** (all leakage-safe — history features use only a card's
 *past* transactions; encoders fit on **train only**):
@@ -186,17 +274,9 @@ of train, by time). The winning feature set + strategy are saved to
 `artifacts/phase2/` for the modeling stage. See the notebook for the comparison table
 and written conclusion.
 
-### Phase 2 (continued) — Tuning, Calibration, Threshold & SHAP
+### Tuning, Calibration, Threshold & SHAP
 
 The same modeling line, continued from the imbalance comparison into a deployable, explainable scorer:
-
-- [x] Optuna hyperparameter tuning (`src/tuning.py`) — optimised on validation PR-AUC
-- [x] Probability calibration, isotonic vs Platt (`src/calibration.py`) — scores usable as risk levels
-- [x] Cost-based decision threshold (`src/threshold.py`) — minimises $ cost, not F1
-- [x] SHAP explanations, `TreeExplainer` (`src/explain.py`) — global summary + per-transaction reasons
-- [x] Modeling notebook (`notebooks/04_tuning_calibration_shap.ipynb`)
-
-**What each step does:**
 
 | Step | How it works |
 |------|--------------|
@@ -208,14 +288,7 @@ The same modeling line, continued from the imbalance comparison into a deployabl
 The tuned + calibrated model, chosen threshold and cost matrix are saved to
 `artifacts/phase2/` (alongside the feature/imbalance artifacts) for the next phase.
 
-### Phase 3 — Experiment Tracking & Model Registry (MLflow)
-
-- [x] Reproducible training script (`src/train.py`) — one command rebuilds the model
-- [x] Every run logs **params, metrics, artifacts and the model** to MLflow
-- [x] Runs are comparable in the MLflow UI (sort by PR-AUC / min-cost)
-- [x] Best model registered as **`SentinelPayFraudModel`** in the Model Registry
-- [x] Promotion via **alias** (`@production`) — the modern, non-deprecated path
-- [x] Manual step-by-step guide (`docs/mlflow_guide.md`)
+### Experiment Tracking & Model Registry (MLflow)
 
 The notebook pipeline (`04_tuning_calibration_shap.ipynb`) is refactored into a
 single script that re-uses the same Phase 2 modules, so the registered model is
@@ -249,7 +322,7 @@ Run `python src/train.py --help` for all flags (`--no-tune`, `--n-trials`,
 **[`docs/mlflow_guide.md`](docs/mlflow_guide.md)** for the full walkthrough:
 starting the server, comparing runs, and registering/promoting in the UI.
 
-### Phase 4 — FastAPI scoring API (Step 1)
+### FastAPI scoring API (Step 1)
 
 A small FastAPI app (`src/serve/api.py`) loads the **Production** model from
 MLflow once at startup and scores a single transaction. It exposes:
@@ -297,7 +370,7 @@ The decision threshold is read from the Phase-2 cost analysis
 is flagged **fraud** when `probability >= threshold`. Interactive API docs are at
 `http://127.0.0.1:8000/docs`.
 
-### Phase 4 — Redis online features (Step 2)
+### Redis online features (Step 2)
 
 Velocity ("how many transactions in the last hour") and travel ("how far / how
 fast from the previous transaction") features need a card's **recent past**. A
@@ -428,7 +501,7 @@ than warm ones: the Redis history lookup is negligible next to feature
 engineering + the model's `predict_proba` + SHAP, which dominate the ~24 ms of
 server-side work. (Re-run the script to get numbers for your own hardware.)
 
-### Phase 4 — Docker: one-command stack (Step 4)
+### Docker: one-command stack (Step 4)
 
 The steps above run three moving parts by hand (MLflow, Redis, the API) and
 assume the Production model is already registered in **your** local MLflow. That
@@ -479,7 +552,7 @@ Inside the compose network the API reaches the other services by name
 absolute host paths anywhere, which is why it runs the same on every machine.
 The registrar is idempotent, so re-running `docker compose up` is always safe.
 
-### Phase 5 — Streaming pipeline (real-time scoring)
+### Streaming pipeline (real-time scoring)
 
 Phase 4 scores **one transaction per HTTP request**. Phase 5 turns that into a
 **live feed**: transactions flow through Kafka, get scored continuously, land in
@@ -557,19 +630,6 @@ replay finishes; the `consumer` keeps running and scores whatever arrives.
 | `producer` | —      | One-shot: replays Sparkov rows in timestamp order, then exits.           |
 | `consumer` | —      | Long-running: scores each transaction and emits alerts.                  |
 
-**Config (environment variables):**
-
-| Variable                  | Default (compose)                                            | Meaning                                        |
-| ------------------------- | ----------------------------------------------------------- | ---------------------------------------------- |
-| `KAFKA_BOOTSTRAP_SERVERS` | `redpanda:29092` (internal) / `localhost:9092` (host)       | Broker address.                                |
-| `TRANSACTIONS_TOPIC`      | `transactions`                                              | The live feed topic.                           |
-| `ALERTS_TOPIC`            | `alerts`                                                    | High-risk output topic.                        |
-| `SCORING_API_URL`         | `http://api:8000/score`                                    | Where the consumer scores each transaction.    |
-| `DATABASE_URL`            | `postgresql://sentinel:sentinel@postgres:5432/sentinelpay`  | Postgres sink.                                 |
-| `STREAM_CSV`              | `data/processed/test_time_split.csv`                       | Which CSV the producer replays.                |
-| `STREAM_LIMIT`            | `1000`                                                     | Rows to replay (`0` = all).                    |
-| `STREAM_SPEEDUP`          | `120`                                                      | Real inter-arrival gap ÷ this factor (pacing). |
-| `STREAM_MAX_DELAY`        | `1.0`                                                      | Cap on any single inter-message sleep (s).     |
 
 To run a producer/consumer **from your host** (outside compose) against the
 published ports, override the addresses, e.g.:
@@ -578,7 +638,7 @@ published ports, override the addresses, e.g.:
 KAFKA_BOOTSTRAP_SERVERS=localhost:9092 python -m src.stream.producer --limit 200 --no-pace
 ```
 
-### Phase 6 — Monitoring & drift detection
+### Monitoring & drift detection
 
 Phase 5 gave us a live stream of scored transactions. Phase 6 makes the system
 **watch itself**: an Evidently-based drift monitor compares each live batch
@@ -691,7 +751,7 @@ docker compose run --rm \
 | `MONITOR_BATCH_ROWS` | `500`                                   | "Live batch" = newest N scored transactions. |
 | `MONITOR_MIN_ROWS`   | `100`                                   | Skip checks until this many rows exist.      |
 
-### Phase 7 — Automated retraining & the self-updating loop
+### Automated retraining & the self-updating loop
 
 Phase 6 detects when the model's world has drifted. Phase 7 closes the loop: the
 system **retrains itself on fresh labelled data and only promotes the new model
@@ -766,7 +826,7 @@ fail only if the pipeline itself breaks.
 | `--tracking-uri`      | `$MLFLOW_TRACKING_URI`         | MLflow registry (sqlite for CI, the stack's for live).|
 | `RETRAIN_COOLDOWN_S`  | `21600` (6h)                   | Min gap between drift-triggered retrains.            |
 
-### Phase 8 — Dashboard, docs & demo
+### Dashboard, docs & demo
 
 Everything above is invisible plumbing until you can *watch* it work. Phase 8
 adds the demo front door: a **Streamlit dashboard** (`src/dashboard/app.py`)
@@ -809,139 +869,9 @@ docker compose up dashboard        # part of the default stack too
   / towards-legit, red = flagged / towards-fraud) and direction is always also
   written in text.
 
-**Config (environment variables, `dashboard` service):**
-
-| Variable              | Default (compose)                                   | Meaning                          |
-| --------------------- | ---------------------------------------------------- | -------------------------------- |
-| `DATABASE_URL`        | `postgresql://sentinel:sentinel@postgres:5432/sentinelpay` | Stream + alerts source.    |
-| `PROMETHEUS_URL`      | `http://prometheus:9090`                             | Drift gauges.                    |
-| `MLFLOW_TRACKING_URI` | `http://mlflow:5000`                                 | `@production` version lookup.    |
-
 **Demo assets:** `docs/demo.md` is the step-by-step 2-minute walkthrough script
 (what to run, what to show, what to say) for recording a Loom/GIF, and
 `docs/resume_bullets.md` has ready-to-use resume lines for this project.
 
-### Upcoming Phases
 
-- [x] Phase 4 — Serving API, online features & Docker (MVP)
-  - [x] Step 1 — FastAPI `/score` endpoint
-  - [x] Step 2 — Redis online features (velocity / geo, cold-start handling)
-  - [x] Step 3 — Latency logging + benchmark (p95 ≈ 32 ms, target < 100 ms)
-  - [x] Step 4 — Dockerfile + docker-compose (MLflow + Redis + API)
-- [x] Phase 5 — Streaming pipeline (Kafka/Redpanda → consumer → Postgres + alerts)
-  - [x] Step 1 — Redpanda + Postgres added to docker-compose
-  - [x] Step 2 — Producer replays Sparkov rows in timestamp order (`transactions` topic)
-  - [x] Step 3 — Consumer scores via `/score`, writes Postgres, publishes `alerts`
-  - [x] Step 4 — End-to-end verification (`verify_stream.py`, `watch_alerts.py`)
-- [x] Phase 6 — Monitoring & drift detection (Evidently + Prometheus + Grafana)
-  - [x] Step 1 — Evidently drift monitor (live batches vs training reference, data + target drift)
-  - [x] Step 2 — Prometheus metrics (API latency/throughput/alert rate + drift gauges) & Grafana dashboard
-  - [x] Step 3 — Drift simulation (`simulate_drift.py`) with a demonstrated firing alert
-- [x] Phase 7 — Automated retraining & the self-updating loop
-  - [x] Step 1 — Raw transaction JSON persisted to Postgres (`raw` JSONB) for retraining
-  - [x] Step 2 — Pure, unit-tested promotion gate (`promotion.py`)
-  - [x] Step 3 — Retrain → challenger → gate → promote entrypoint (`retrain.py`)
-  - [x] Step 4 — Synthetic Sparkov-shaped generator for CI/tests (`synthetic_data.py`)
-  - [x] Step 5 — pytest suite + GitHub Actions (`ci.yml` lint+tests, `retrain.yml` synthetic E2E)
-  - [x] Step 6 — Drift-triggered retraining (`auto_retrain_on_drift.py` + compose `retrainer` service)
-- [x] Phase 8 — Dashboard, docs & demo
-  - [x] Step 1 — Streamlit dashboard: live stream, alerts + SHAP, model & drift (`src/dashboard/`)
-  - [x] Step 2 — README: architecture diagram, metrics table, one-command quick start
-  - [x] Step 3 — Demo walkthrough script (`docs/demo.md`) + resume bullets (`docs/resume_bullets.md`)
-  - [ ] Step 4 — Record the 2-minute Loom / demo GIF (script ready in `docs/demo.md`)
-
-## Project Structure
-
-```
-data/
-├── fraudTrain.csv          # Raw Kaggle dataset (train)
-├── fraudTest.csv           # Raw Kaggle dataset (test)
-└── processed/
-    ├── train_time_split.csv  # Chronological 80% train split
-    └── test_time_split.csv   # Chronological 20% test split
-src/
-├── features.py             # Leakage-safe feature engineering (FeatureEngineer)
-├── data.py                 # Load splits + chronological validation split
-├── imbalance.py            # Class-weight vs SMOTE comparison + metrics
-├── tuning.py               # Optuna hyperparameter search (validation PR-AUC)
-├── calibration.py          # Isotonic / Platt probability calibration
-├── threshold.py            # Cost-matrix decision-threshold selection
-├── explain.py              # SHAP TreeExplainer (global + per-transaction)
-├── artifacts.py            # Persist feature/imbalance decisions + trained model
-├── metrics.py              # Phase 3: consolidated eval metrics (PR-AUC, recall@p, cost)
-├── evaluate.py             # Phase 3: plot + report generation (SHAP, importance, cost, JSON)
-├── train.py                # Phase 3: reproducible training entry point + MLflow logging
-├── promotion.py            # Phase 7: pure, unit-tested champion-vs-challenger gate
-├── synthetic_data.py       # Phase 7: Sparkov-shaped generator for CI/tests
-├── retrain.py              # Phase 7: pull recent data -> train challenger -> gate -> promote
-├── serve/
-│   ├── api.py              # Phase 4: FastAPI /health + /score (loads Production model)
-│   ├── redis_store.py      # Phase 4: Redis online features (recent card history)
-│   └── register_model.py   # Phase 4: one-shot MLflow registrar (Docker bootstrap)
-├── stream/                 # Phase 5: streaming pipeline
-│   ├── config.py           #   shared env config (broker, topics, DB, API URL)
-│   ├── db.py               #   Postgres schema + inserts (raw JSONB for Phase 7 retraining)
-│   ├── producer.py         #   replay Sparkov rows in timestamp order -> transactions
-│   └── consumer.py         #   score via /score, write Postgres, publish -> alerts
-├── monitor/                # Phase 6: monitoring & drift detection
-│   └── drift_monitor.py    #   Evidently checks vs training reference -> Prometheus gauges
-└── dashboard/              # Phase 8: Streamlit demo dashboard
-    └── app.py              #   live stream + alerts/SHAP + model & drift (port 8501)
-monitoring/                 # Phase 6: Prometheus + Grafana configuration
-├── prometheus.yml          #   scrape api:8000 + monitor:8001 every 5s
-├── alerts.yml              #   drift + operational alert rules
-└── grafana/                #   auto-provisioned datasource + live dashboard
-scripts/
-├── test_online_features.py  # Phase 4: manual test (cold_start true -> false)
-├── benchmark_latency.py     # Phase 4: /score latency benchmark (p50/p95/p99)
-├── verify_stream.py         # Phase 5: end-to-end check of the Postgres sink
-├── watch_alerts.py          # Phase 5: live tail of the alerts topic
-├── simulate_drift.py        # Phase 6: manufacture a drifted feed (amt/category/hour/labels)
-└── auto_retrain_on_drift.py # Phase 7: watch Prometheus drift alerts -> trigger the retrainer
-tests/                       # Phase 7: pytest suite (runs on synthetic data)
-├── conftest.py              #   shared fixtures (synthetic frame, tmp registry)
-├── test_promotion.py        #   promotion gate rule (pure, no MLflow)
-├── test_features.py         #   feature engineering shape + leakage-safety
-├── test_metrics.py          #   PR-AUC / recall@p / cost metric helpers
-├── test_threshold.py        #   cost-matrix threshold selection
-├── test_drift_monitor.py    #   drift monitor gauges
-├── test_simulate_drift.py   #   drift simulator output
-└── test_train_smoke.py      #   end-to-end training smoke test
-.github/workflows/           # Phase 7: CI
-├── ci.yml                   #   lint + pytest on every push / PR
-└── retrain.yml              #   scheduled + on-demand synthetic retrain E2E
-docs/
-├── mlflow_guide.md         # Phase 3: step-by-step MLflow walkthrough
-├── demo.md                 # Phase 8: 2-minute demo walkthrough script (for Loom/GIF)
-├── demo_prep.md            # Phase 8: exact command order to get demo-ready
-└── resume_bullets.md       # Phase 8: ready-to-use resume lines for this project
-reports/                    # Phase 3: generated plots + JSON/CSV reports (git-ignored)
-mlruns/ + mlflow.db         # Phase 3: MLflow artifact store + tracking DB (git-ignored)
-notebooks/
-├── load_and_check.ipynb              # Initial sanity checks
-├── 01_eda_time_split.ipynb           # EDA & time-based split
-├── 02_baseline_lightgbm.ipynb        # Baseline LightGBM (6 raw features)
-├── 03_feature_eng_imbalance.ipynb    # Phase 2: features + imbalance comparison
-└── 04_tuning_calibration_shap.ipynb  # Phase 2 (cont.): tuning, calibration, threshold, SHAP
-artifacts/
-└── phase2/                 # Feature engineer + manifests, comparison table,
-                            #   tuned/calibrated model + model manifest
-```
-
-## Set Up
-
-1. Manually download the train and test datasets from "https://www.kaggle.com/datasets/kartik2112/fraud-detection" and place them in the `data` folder. The datasets are too large to be included in this repository.
-
-```
-data
-|__ fraudTest.csv
-|__ fraudTrain.csv
-```
-2. Create a virtual environment and install the dependencies:
-
-```
-python -m venv .venv
-.venv/bin/activate 
-pip install -r requirements.txt 
-```
 
