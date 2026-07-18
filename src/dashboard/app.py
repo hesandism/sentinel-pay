@@ -208,10 +208,9 @@ with st.sidebar:
         # The stack consoles are localhost-only; on the public deploy point
         # people at the source instead.
         st.caption(
-            "Live demo — synthetic data, no backend.\n\n"
-            "- [Source on GitHub](https://github.com/HesandiSM/sentinel-pay) — full stack\n"
-            "- Run it locally with `docker compose up` for the real Kafka → "
-            "API → Postgres pipeline."
+            "Live demo\n"
+            "- [Source on GitHub](https://github.com/HesandiSM/sentinel-pay) : full stack\n"
+          
         )
     else:
         st.caption(
@@ -236,10 +235,7 @@ st.title("SentinelPay :   Real-time fraud detection")
 
 if DEMO_MODE:
     st.info(
-        "🎛️ **Live demo** — running on a deterministic synthetic snapshot "
-        "(~24h of scored transactions), so it renders with no backend. The full "
-        "system streams real Sparkov transactions through Kafka → the scoring "
-        "API → Postgres. [Source on GitHub](https://github.com/HesandiSM/sentinel-pay)."
+        "**Live demo** - running on a deterministic synthetic snapshot. The full system streams real Sparkov transactions through Kafka → the scoring "
     )
 
 if not postgres_reachable():
@@ -288,10 +284,8 @@ c4.metric("Latency p50", f"{kpis['p50_ms']:.0f} ms" if pd.notna(kpis["p50_ms"]) 
 c5.metric("Latency p95", f"{kpis['p95_ms']:.0f} ms" if pd.notna(kpis["p95_ms"]) else "—")
 
 if scored == 0:
-    st.info(
-        "No scored transactions in this window yet. Replay some: "
-        "`docker compose up producer` (or widen the time window)."
-    )
+    st.info("No scored transactions in this window yet. Replay some: "
+        "`docker compose up producer` (or widen the time window).")
 
 tab_stream, tab_alerts, tab_model = st.tabs(
     ["Live stream", "Fraud alerts & SHAP", "Model & drift"]
@@ -587,7 +581,7 @@ with tab_model:
             "mount `./reports` into the dashboard container) to populate it."
         )
 
-    st.subheader("Last retraining gate decision (Phase 7)")
+    st.subheader("Last retraining gate decision")
     gate = load_json_report("retrain/promotion_report.json")
     if gate:
         verdict = "✅ PROMOTED — challenger beat the champion" if gate["promoted"] else \
@@ -616,7 +610,7 @@ with tab_model:
 # --------------------------------------------------------------------------- #
 st.caption(
     f"Updated {datetime.now(timezone.utc):%H:%M:%S} UTC · "
-    "SentinelPay Phase 8 dashboard"
+    "SentinelPay dashboard"
 )
 if auto_refresh:
     time.sleep(refresh_s)

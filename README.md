@@ -2,6 +2,21 @@
 
 **Real-time card-fraud detection with the full MLOps loop — not just a notebook.**
 
+[![Live Demo](https://img.shields.io/badge/%E2%96%B6%20Live%20Demo-Streamlit%20Cloud-FF4B4B?style=for-the-badge&logo=streamlit&logoColor=white)](https://sentinel-pay-hzg2nnqckg8ekc4ymvpz7g.streamlit.app/)
+&nbsp;
+[![CI](https://github.com/HesandiSM/sentinel-pay/actions/workflows/ci.yml/badge.svg)](https://github.com/HesandiSM/sentinel-pay/actions/workflows/ci.yml)
+
+![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)
+![Streamlit](https://img.shields.io/badge/Streamlit-FF4B4B?logo=streamlit&logoColor=white)
+![LightGBM](https://img.shields.io/badge/LightGBM-9ACD32?logo=lightgbm&logoColor=white)
+![MLflow](https://img.shields.io/badge/MLflow-0194E2?logo=mlflow&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white)
+![Redis](https://img.shields.io/badge/Redis-DC382D?logo=redis&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1?logo=postgresql&logoColor=white)
+![Prometheus](https://img.shields.io/badge/Prometheus-E6522C?logo=prometheus&logoColor=white)
+![Grafana](https://img.shields.io/badge/Grafana-F46800?logo=grafana&logoColor=white)
+
 Transactions flow through a streaming pipeline, get enriched with behavioural
 features (spending velocity, geographic distance from the last transaction,
 deviation from a card's normal spend), and are scored by a calibrated
@@ -14,6 +29,33 @@ model only if it provably wins** — automatically.
      docs/media/demo.gif, then uncomment:
 ![SentinelPay live dashboard](docs/media/demo.gif)
 -->
+
+## 🚀 Live demo
+
+### **[▶ Open the live dashboard →](https://sentinel-pay-hzg2nnqckg8ekc4ymvpz7g.streamlit.app/)**
+
+No install, no login. The public dashboard runs in **demo mode** — a
+self-contained, time-anchored synthetic stream with *no backend*, so the
+transaction feed, fraud alerts with per-alert SHAP explanations, and the
+model/drift panels all render and update live. The offline evaluation metrics on
+the "Model & drift" tab are the **real** numbers from training.
+
+> Want the full pipeline — Kafka → scoring API → Postgres → drift detection →
+> automatic retraining? That's one command locally: see
+> [The 60-second tour](#the-60-second-tour).
+
+## Tech stack
+
+| Layer | Tools |
+|---|---|
+| **ML / modelling** | LightGBM · scikit-learn · SHAP · imbalanced-learn |
+| **Serving** | FastAPI · Uvicorn · Redis (online features) |
+| **Streaming** | Redpanda (Kafka API) · custom producer/consumer |
+| **Storage** | PostgreSQL · Redis |
+| **MLOps** | MLflow (tracking + registry) · Evidently (drift) · automated retrain + promotion gate |
+| **Monitoring** | Prometheus · Grafana |
+| **Dashboard** | Streamlit · Altair |
+| **Infra / CI** | Docker Compose · GitHub Actions |
 
 ## Headline results
 
